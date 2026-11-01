@@ -1,0 +1,14 @@
+{
+  "name": "plate-dm-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "22.x" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "@vercel/functions": "^2.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "pg": "^8.13.0"
+  }
+}
