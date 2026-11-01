@@ -69,20 +69,20 @@ async function load() {
   data = await r.json();
   const o = data.orders;
   $('#stats').innerHTML =
-    `<div><b>${o.length}</b><span>Paid orders</span></div>` +
-    `<div><b>₹${o.reduce((a, x) => a + x.amount, 0)}</b><span>Collected</span></div>` +
-    `<div><b>${data.convos.filter((c) => c.status === 'awaiting_payment').length}</b><span>Awaiting payment</span></div>`;
+    \`<div><b>\${o.length}</b><span>Paid orders</span></div>\` +
+    \`<div><b>₹\${o.reduce((a, x) => a + x.amount, 0)}</b><span>Collected</span></div>\` +
+    \`<div><b>\${data.convos.filter((c) => c.status === 'awaiting_payment').length}</b><span>Awaiting payment</span></div>\`;
   $('#orders').innerHTML = o.map((r) => {
     const x = JSON.parse(r.order_json);
-    return `<div class="card"><div class="row"><b>${esc(x.plate_text)}</b><span class="ok">₹${r.amount} paid</span></div>
-      <p>${esc(x.vehicle)}: ${esc(x.name)}, ${esc(x.phone)}</p><p>${esc(x.address)}</p>
-      <small>@${esc(r.username)} on ${new Date(r.paid_at).toLocaleString()} (${esc(r.payment_id)})</small></div>`;
+    return \`<div class="card"><div class="row"><b>\${esc(x.plate_text)}</b><span class="ok">₹\${r.amount} paid</span></div>
+      <p>\${esc(x.vehicle)}: \${esc(x.name)}, \${esc(x.phone)}</p><p>\${esc(x.address)}</p>
+      <small>@\${esc(r.username)} on \${new Date(r.paid_at).toLocaleString()} (\${esc(r.payment_id)})</small></div>\`;
   }).join('') || '<p class="mut">No paid orders yet.</p>';
   $('#convos').innerHTML = data.convos.map((c) => {
     const x = JSON.parse(c.order_json);
-    return `<div class="card" data-id="${esc(c.ig_id)}"><div class="row"><b>@${esc(c.username || c.ig_id)}</b>
-      <span class="${c.status === 'paid' ? 'ok' : c.status === 'awaiting_payment' ? 'warn' : 'mut'}">${STATUS[c.status]}${c.paused ? ' (bot paused)' : ''}</span></div>
-      <small>${esc(x.vehicle || 'vehicle not set')}${x.plate_text ? ': ' + esc(x.plate_text) : ''}</small></div>`;
+    return \`<div class="card" data-id="\${esc(c.ig_id)}"><div class="row"><b>@\${esc(c.username || c.ig_id)}</b>
+      <span class="\${c.status === 'paid' ? 'ok' : c.status === 'awaiting_payment' ? 'warn' : 'mut'}">\${STATUS[c.status]}\${c.paused ? ' (bot paused)' : ''}</span></div>
+      <small>\${esc(x.vehicle || 'vehicle not set')}\${x.plate_text ? ': ' + esc(x.plate_text) : ''}</small></div>\`;
   }).join('') || '<p class="mut">No chats yet.</p>';
   if (openId) showChat(openId, false);
 }
@@ -94,7 +94,7 @@ async function showChat(id, scroll = true) {
   $('#chat').hidden = false;
   $('#who').textContent = '@' + (c?.username || id);
   $('#pause').textContent = c?.paused ? 'Resume bot' : 'Pause bot';
-  $('#log').innerHTML = msgs.map((m) => `<div class="b ${m.role}">${esc(m.text)}</div>`).join('');
+  $('#log').innerHTML = msgs.map((m) => \`<div class="b \${m.role}">\${esc(m.text)}</div>\`).join('');
   if (scroll) $('#log').scrollTop = $('#log').scrollHeight;
 }
 
