@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import pg from 'pg';
 import { waitUntil } from '@vercel/functions';
 import DASHBOARD from './dashboard-html.js';
+import PRIVACY_POLICY from './privacy-policy.js';
 
 const E = process.env;
 const PRICE = { car: Number(E.PRICE_CAR || 1200), bike: Number(E.PRICE_BIKE || 700) };
@@ -270,6 +271,7 @@ async function handleIncoming(id, rowId) {
 const app = express();
 app.use(express.json({ verify: (req, _res, buf) => { req.raw = buf; } }));
 app.get('/', (_, res) => res.type('html').send(DASHBOARD)); // the page holds no data; /api needs the password
+app.get(['/privacy-policy', '/privacy-policy.html'], (_, res) => res.type('html').send(PRIVACY_POLICY));
 app.get('/dashboard', (_, res) => res.redirect('/'));
 app.get('/health', async (_, res) => {
   try { await ready; await q('SELECT 1'); res.json({ ok: true, database: 'connected', configured: { instagram: Boolean(E.IG_API_VERSION && E.IG_ACCESS_TOKEN && E.IG_APP_SECRET && E.IG_VERIFY_TOKEN), anthropic: Boolean(E.ANTHROPIC_API_KEY && E.CLAUDE_MODEL), razorpay: Boolean(E.RAZORPAY_KEY_ID && E.RAZORPAY_KEY_SECRET && E.RAZORPAY_WEBHOOK_SECRET), resend: Boolean(E.RESEND_API_KEY && E.MAIL_FROM && E.OWNER_EMAIL), dashboard: Boolean(E.DASHBOARD_PASSWORD && E.DASHBOARD_PASSWORD.length >= 16) } }); }
