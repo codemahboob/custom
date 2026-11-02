@@ -66,11 +66,45 @@ const mail = (subject, html) => fetch('https://api.resend.com/emails', {
   headers: { Authorization: `Bearer ${E.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
   body: JSON.stringify({ from: E.MAIL_FROM, to: [E.OWNER_EMAIL], subject, html }),
 }).then(json).catch((e) => console.error('mail failed:', e.message));
-const claude = (system, messages) => { if (!E.ANTHROPIC_API_KEY || !E.CLAUDE_MODEL) throw new Error('Set ANTHROPIC_API_KEY and a currently supported CLAUDE_MODEL.'); return fetch('https://api.anthropic.com/v1/messages', {
-  method: 'POST',
-  headers: { 'x-api-key': E.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-  body: JSON.stringify({ model: E.CLAUDE_MODEL, max_tokens: 700, system, tools: TOOLS, messages }),
-}).then(json); };
+const gemini = async (system, messages) => {
+  if (!E.GEMINI_API_KEY) throw new Error('Set GEMINI_API_KEY in Vercel environment variables.');
+  const model = E.GEMINI_MODEL || 'gemini-3.8-flash';
+  const namesById = new Map();
+  const contents = messages.map((message) => {
+    const role = message.role === 'assistant' ? 'model' : 'user';
+    const blocks = Array.isArray(message.content) ? message.content : [{ type: 'text', text: String(message.content ?? '') }];
+    const parts = blocks.flatMap((block) => {
+      if (block.type === 'text') return block.text ? [{ text: block.text }] : [];
+      if (block.type === 'tool_use') {
+        namesById.set(block.id, block.name);
+        return [{ functionCall: { name: block.name, args: block.input || {}, ...(block.id ? { id: block.id } : {}) } }];
+      }
+      if (block.type === 'tool_result') {
+        const name = namesById.get(block.tool_use_id);
+        return name ? [{ functionResponse: { name, response: { output: String(block.content ?? '') }, ...(block.tool_use_id ? { id: block.tool_use_id } : {}) } }] : [];
+      }
+      return [];
+    });
+    return parts.length ? { role, parts } : null;
+  }).filter(Boolean);
+  const body = {
+    systemInstruction: { parts: [{ text: system }] },
+    contents,
+    tools: [{ functionDeclarations: TOOLS.map(({ name, description, input_schema }) => ({ name, description, parameters: input_schema })) }],
+    generationConfig: { maxOutputTokens: 700 },
+  };
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: 'POST',
+    headers: { 'x-goog-api-key': E.GEMINI_API_KEY, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(json);
+  const parts = response.candidates?.[0]?.content?.parts || [];
+  return { content: parts.flatMap((part) => {
+    if (part.text) return [{ type: 'text', text: part.text }];
+    if (part.functionCall) return [{ type: 'tool_use', id: part.functionCall.id || crypto.randomUUID(), name: part.functionCall.name, input: part.functionCall.args || {} }];
+    return [];
+  }) };
+};
 const fetchName = (id) => fetch(`https://graph.instagram.com/${IG_API_VERSION}/${id}?fields=username`, { headers: { Authorization: `Bearer ${E.IG_ACCESS_TOKEN}` } })
   .then(json).then((u) => q('UPDATE convos SET username=$1 WHERE ig_id=$2', [u.username, id])).catch(() => {});
 
@@ -234,7 +268,7 @@ async function respond(id) {
     const o = JSON.parse(cur.order_json);
     const pastOrders = (await q('SELECT order_json,amount,paid_at FROM orders WHERE ig_id=$1 ORDER BY paid_at DESC LIMIT 5', [id])).rows;
     const system = `${PROMPT}\n\nPERSISTENT CUSTOMER MEMORY: ${JSON.stringify(profile?.profile_json || {})}\nCUSTOMER SUMMARY: ${profile?.memory_summary || 'No saved summary yet.'}\nPAST PAID ORDERS: ${JSON.stringify(pastOrders)}\nSTATUS: ${cur.status}\nORDER ABHI: ${JSON.stringify(o)}\nMISSING: ${missing(o).join(', ') || 'kuch nahi'}`;
-    const r = await claude(system, msgs);
+    const r = await gemini(system, msgs);
     msgs.push({ role: 'assistant', content: r.content });
     const uses = r.content.filter((b) => b.type === 'tool_use');
     if (!uses.length) {
@@ -274,7 +308,7 @@ app.get('/', (_, res) => res.type('html').send(DASHBOARD)); // the page holds no
 app.get(['/privacy-policy', '/privacy-policy.html'], (_, res) => res.type('html').send(PRIVACY_POLICY));
 app.get('/dashboard', (_, res) => res.redirect('/'));
 app.get('/health', async (_, res) => {
-  try { await ready; await q('SELECT 1'); res.json({ ok: true, database: 'connected', configured: { instagram: Boolean(E.IG_API_VERSION && E.IG_ACCESS_TOKEN && E.IG_APP_SECRET && E.IG_VERIFY_TOKEN), anthropic: Boolean(E.ANTHROPIC_API_KEY && E.CLAUDE_MODEL), razorpay: Boolean(E.RAZORPAY_KEY_ID && E.RAZORPAY_KEY_SECRET && E.RAZORPAY_WEBHOOK_SECRET), resend: Boolean(E.RESEND_API_KEY && E.MAIL_FROM && E.OWNER_EMAIL), dashboard: Boolean(E.DASHBOARD_PASSWORD && E.DASHBOARD_PASSWORD.length >= 16) } }); }
+  try { await ready; await q('SELECT 1'); res.json({ ok: true, database: 'connected', configured: { instagram: Boolean(E.IG_API_VERSION && E.IG_ACCESS_TOKEN && E.IG_APP_SECRET && E.IG_VERIFY_TOKEN), gemini: Boolean(E.GEMINI_API_KEY), razorpay: Boolean(E.RAZORPAY_KEY_ID && E.RAZORPAY_KEY_SECRET && E.RAZORPAY_WEBHOOK_SECRET), resend: Boolean(E.RESEND_API_KEY && E.MAIL_FROM && E.OWNER_EMAIL), dashboard: Boolean(E.DASHBOARD_PASSWORD && E.DASHBOARD_PASSWORD.length >= 16) } }); }
   catch (e) { res.status(500).json({ ok: false, error: String(e.message).slice(0, 150) }); }
 });
 app.use((req, res, next) => ready.then(() => next(), next));
