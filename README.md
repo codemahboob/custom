@@ -1,6 +1,6 @@
 # Plate DM Agent
 
-Instagram DM sales assistant for custom number-plate orders. It uses Claude for conversation, Razorpay UPI QR codes for payment, Neon/Postgres for durable conversations and customer memory, and Resend for owner notifications.
+Instagram DM sales assistant for custom number-plate orders. It uses Google Gemini for conversation, Razorpay UPI QR codes for payment, Neon/Postgres for durable conversations and customer memory, and Resend for owner notifications.
 
 ## What changed in 1.1.0
 
@@ -9,14 +9,14 @@ Instagram DM sales assistant for custom number-plate orders. It uses Claude for 
 - Added persistent `customer_profiles` memory keyed by Instagram sender ID. The agent can save useful non-sensitive facts and a short summary, and receives that memory plus up to five previous paid orders in later conversations.
 - Added a dashboard customer panel showing saved facts, summary, and previous paid orders.
 - Added phone/PIN validation, timing-safe webhook signature checks, stronger dashboard password validation, a health/configuration endpoint, and Vercel configuration.
-- The Anthropic model is now explicitly configured instead of relying on an invalid/stale hard-coded default.
+- The agent now uses Google's Gemini API with configurable model selection.
 
 ## Requirements
 
 - Node.js 22+
 - Neon or another PostgreSQL database
 - Instagram Professional account and Meta app with Instagram Messaging permissions
-- Anthropic API key and a currently supported Claude model ID
+- Google Gemini API key
 - Razorpay account with UPI QR Codes enabled
 - Resend account with a verified sender domain
 - Vercel account (or another Node.js host that supports long-running webhook work)
@@ -24,7 +24,7 @@ Instagram DM sales assistant for custom number-plate orders. It uses Claude for 
 ## Local setup
 
 1. Copy `.env.example` to `.env`.
-2. Fill in all credentials and choose a currently supported model ID from Anthropic's model list for `CLAUDE_MODEL`.
+2. Fill in all credentials, including `GEMINI_API_KEY`. Optionally set `GEMINI_MODEL` (default: `gemini-3.8-flash`).
 3. Set `DATABASE_URL` to a Postgres connection string. For Neon, use its pooled connection string and enable SSL as provided by Neon.
 4. Set `DASHBOARD_PASSWORD` to a random secret of at least 32 characters.
 5. Run `npm install`, then `npm start`.
@@ -48,8 +48,8 @@ For local testing, set `DELAY_SCALE=0`. Do not use test Razorpay keys for live c
 |---|---|
 | `DATABASE_URL` / `POSTGRES_URL` | Postgres connection |
 | `DASHBOARD_PASSWORD` | Dashboard password, minimum 16 chars; use 32+ random chars |
-| `ANTHROPIC_API_KEY` | Claude API key |
-| `CLAUDE_MODEL` | Current model ID supported by your Anthropic account; no hard-coded fallback |
+| `GEMINI_API_KEY` | Google Gemini API key |
+| `GEMINI_MODEL` | Gemini model ID (default: `gemini-3.8-flash`) |
 | `IG_ACCESS_TOKEN` | Instagram API access token |
 | `IG_APP_SECRET` | Meta app secret for webhook signature validation |
 | `IG_VERIFY_TOKEN` | Random webhook verification token |
@@ -87,7 +87,7 @@ A screenshot or a customer's claim is never proof of payment. The app checks the
 ## Important production checks
 
 - Use a current Meta Graph API version and confirm the Instagram Login messaging endpoint/token scopes match your app configuration. `IG_API_VERSION` is configurable because Meta versions change.
-- Confirm the configured Claude model ID is currently available to your Anthropic account.
+- Confirm the configured Gemini model ID is available to your Google AI Studio API key.
 - Verify the exact Razorpay QR webhook payload and test captured/failed/duplicate event scenarios in test mode.
 - Configure log monitoring and database backups/retention. Customer chat history includes personal contact and delivery details; restrict database and dashboard access.
 - Test delivery address, phone validation, paused chats, duplicate webhook events, refunds/complaints, and Meta's 24-hour messaging window before launch.
