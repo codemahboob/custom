@@ -1,5 +1,5 @@
 // Dashboard page, served by server.js at /. Plain HTML inside a template literal.
-export default \`<!doctype html>
+export default `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -120,4 +120,4 @@ setInterval(()=>{if(pw)load().catch(()=>{});},10000);
 </script>
 </body>
 </html>
-\`;
+`;
