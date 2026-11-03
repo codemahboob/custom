@@ -42,11 +42,23 @@ ALTER TABLE convos ADD COLUMN IF NOT EXISTS qr_id TEXT;
 ALTER TABLE convos ADD COLUMN IF NOT EXISTS amount INT;
 ALTER TABLE convos ADD COLUMN IF NOT EXISTS updated_at BIGINT;
 ALTER TABLE convos ADD COLUMN IF NOT EXISTS lock_until BIGINT NOT NULL DEFAULT 0;
+UPDATE convos SET paused=0 WHERE paused IS NULL;
+UPDATE convos SET status='chatting' WHERE status IS NULL OR status='';
+UPDATE convos SET order_json='{}' WHERE order_json IS NULL OR order_json='';
 UPDATE convos SET lock_until=0 WHERE lock_until IS NULL;
+ALTER TABLE convos ALTER COLUMN paused SET DEFAULT 0;
+ALTER TABLE convos ALTER COLUMN paused SET NOT NULL;
+ALTER TABLE convos ALTER COLUMN status SET DEFAULT 'chatting';
+ALTER TABLE convos ALTER COLUMN status SET NOT NULL;
+ALTER TABLE convos ALTER COLUMN order_json SET DEFAULT '{}';
+ALTER TABLE convos ALTER COLUMN order_json SET NOT NULL;
 ALTER TABLE convos ALTER COLUMN lock_until SET DEFAULT 0;
 ALTER TABLE convos ALTER COLUMN lock_until SET NOT NULL;
 ALTER TABLE msgs ADD COLUMN IF NOT EXISTS mid TEXT;
 ALTER TABLE msgs ADD COLUMN IF NOT EXISTS ts BIGINT NOT NULL DEFAULT 0;
+UPDATE msgs SET ts=0 WHERE ts IS NULL;
+ALTER TABLE msgs ALTER COLUMN ts SET DEFAULT 0;
+ALTER TABLE msgs ALTER COLUMN ts SET NOT NULL;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS username TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_json TEXT NOT NULL DEFAULT '{}';
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS amount INT NOT NULL DEFAULT 0;
@@ -525,7 +537,19 @@ app.post('/webhook/instagram', (req, res) => {
       const messageId = message.mid || message.message_id;
       const rowId = await addMsg(customerId, 'user', messageText, messageId, timestamp);
       if (!rowId) {
-        console.info('[ig-webhook] duplicate message ignored', requestId);
+        // A previous delivery may have saved the message but failed during
+        // background processing. Re-schedule it safely; respond() is idempotent
+        // with respect to a conversation whose latest message was answered.
+        const existing = (await q(
+          "SELECT id FROM msgs WHERE ig_id=$1 AND role='user' AND mid=$2 LIMIT 1",
+          [customerId, messageId]
+        )).rows[0];
+        if (existing?.id) {
+          persisted.push({ customerId, rowId: Number(existing.id) });
+          console.info('[ig-webhook] duplicate message queued for safe retry', requestId);
+        } else {
+          console.info('[ig-webhook] duplicate message ignored', requestId);
+        }
         continue;
       }
       await q(
