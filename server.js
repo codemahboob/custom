@@ -545,7 +545,11 @@ app.post('/webhook/razorpay', (req, res) => {
   waitUntil((async () => {
     const c = (await q('SELECT * FROM convos WHERE qr_id=$1', [qrId])).rows[0];
     if (!c) return void (await mail('Unmatched Razorpay payment', `<p>Payment ${esc(pay.id)} (₹${pay.amount / 100}) on QR ${esc(qrId)} matches no chat.</p>`));
-    if (pay.status === 'captured' && pay.currency === 'INR' && pay.amount === c.amount * 100 && pay.qr_code_id === c.qr_id) await confirmPaid(c.ig_id, pay.id);
+    // The QR ID comes from the signed qr_code.credited webhook envelope.
+    // confirmPaid then verifies payment membership via Razorpay's QR-scoped API.
+    if (pay.status === 'captured' && pay.currency === 'INR' && pay.amount === c.amount * 100) {
+      await confirmPaid(c.ig_id, pay.id);
+    }
   })().catch((e) => console.error('razorpay webhook failed', e.message)));
 });
 
