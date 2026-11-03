@@ -1,7 +1,9 @@
 import express from 'express';
 import crypto from 'node:crypto';
 
-const API_VERSION = `v${String(process.env.META_API_VERSION || 'v26.0').trim().replace(/^v/i, '')}`;
+const apiVersionSetting = String(process.env.META_API_VERSION || '').trim() || 'v26.0';
+const API_VERSION = `v${apiVersionSetting.replace(/^v/i, '')}`;
+if (!/^v\d+\.\d+$/.test(API_VERSION)) throw new Error('META_API_VERSION must look like v26.0.');
 const graph = (path) => `https://graph.facebook.com/${API_VERSION}/${path}`;
 const key = () => {
   const raw = String(process.env.META_TOKEN_ENCRYPTION_KEY || '').trim();
