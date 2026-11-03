@@ -400,16 +400,60 @@ app.post('/webhook/instagram', (req, res) => {
     return res.sendStatus(200);
   }
 
-  const allEvents = entries.flatMap((entry) => Array.isArray(entry?.messaging) ? entry.messaging : []);
-  const events = allEvents.filter((event) => event?.message && !event.message.is_echo && event.sender?.id && event.message.mid);
+  // Instagram Messaging webhooks normally arrive in entry.messaging[].
+  // Also normalize messages delivered through changes[].value when that value
+  // contains a complete sender/message event. Subscription-test notifications
+  // that only identify the changed field are intentionally not treated as DMs.
+  const messagingEvents = entries.flatMap((entry) =>
+    Array.isArray(entry?.messaging) ? entry.messaging : []
+  );
+  const changeEvents = entries.flatMap((entry) =>
+    (Array.isArray(entry?.changes) ? entry.changes : [])
+      .filter((change) => change?.field === 'messages')
+      .flatMap((change) => {
+        const value = change?.value;
+        if (!value || typeof value !== 'object') return [];
+        if (Array.isArray(value.messaging)) return value.messaging;
+        if (Array.isArray(value.messages)) {
+          return value.messages.map((message) => ({
+            ...value,
+            ...message,
+            sender: message?.sender || value.sender,
+            timestamp: message?.timestamp || value.timestamp,
+            message: message?.message || message,
+          }));
+        }
+        if (value.message && value.sender?.id) return [value];
+        if (value.sender?.id && (value.mid || value.message_id)) {
+          return [{
+            ...value,
+            message: {
+              mid: value.mid || value.message_id,
+              text: value.text,
+              attachments: value.attachments,
+              is_echo: value.is_echo,
+            },
+          }];
+        }
+        return [];
+      })
+  );
+  const allEvents = [...messagingEvents, ...changeEvents];
+  const events = allEvents.filter((event) =>
+    event?.message && !event.message.is_echo && event.sender?.id &&
+    (event.message.mid || event.message.message_id)
+  );
   console.info('[ig-webhook] parsed', JSON.stringify({
-    requestId, objectType, totalMessagingEvents: allEvents.length,
+    requestId, objectType,
+    messagingEvents: messagingEvents.length,
+    changeMessageEvents: changeEvents.length,
+    totalMessagingEvents: allEvents.length,
     acceptedMessageEvents: events.length,
     ignored: {
       noMessage: allEvents.filter((event) => !event?.message).length,
       echo: allEvents.filter((event) => Boolean(event?.message?.is_echo)).length,
       missingSender: allEvents.filter((event) => event?.message && !event.message.is_echo && !event.sender?.id).length,
-      missingMessageId: allEvents.filter((event) => event?.message && !event.message.is_echo && event.sender?.id && !event.message.mid).length,
+      missingMessageId: allEvents.filter((event) => event?.message && !event.message.is_echo && event.sender?.id && !(event.message.mid || event.message.message_id)).length,
     },
   }));
 
@@ -424,7 +468,8 @@ app.post('/webhook/instagram', (req, res) => {
       const text = typeof message.text === 'string' && message.text.trim()
         ? message.text.trim().slice(0, 4000)
         : `[${message.attachments?.[0]?.type || 'unsupported'}]`;
-      const rowId = await addMsg(customerId, 'user', text, message.mid, timestamp);
+      const messageId = message.mid || message.message_id;
+      const rowId = await addMsg(customerId, 'user', text, messageId, timestamp);
       if (!rowId) {
         console.info('[ig-webhook] duplicate message ignored', requestId);
         return;
