@@ -5,6 +5,7 @@ import pg from 'pg';
 import { waitUntil } from '@vercel/functions';
 import DASHBOARD from './dashboard-html.js';
 import PRIVACY_POLICY from './privacy-policy.js';
+import { createInstagramOAuthRouter, getInstagramIntegration } from './instagram-oauth.js';
 
 const E = process.env;
 const PRICE = { car: Number(E.PRICE_CAR || 1200), bike: Number(E.PRICE_BIKE || 700) };
@@ -31,7 +32,9 @@ ALTER TABLE convos ADD COLUMN IF NOT EXISTS memory_summary TEXT NOT NULL DEFAULT
 CREATE INDEX IF NOT EXISTS msgs_ig ON msgs(ig_id, id);
 CREATE INDEX IF NOT EXISTS orders_ig ON orders(ig_id, paid_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS orders_payment_id_unique ON orders(payment_id) WHERE payment_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS convos_updated ON convos(updated_at DESC);`;
+CREATE INDEX IF NOT EXISTS convos_updated ON convos(updated_at DESC);
+CREATE TABLE IF NOT EXISTS meta_oauth_states(state_hash TEXT PRIMARY KEY, expires_at BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS meta_integrations(provider TEXT PRIMARY KEY, token_ciphertext TEXT NOT NULL, ig_user_id TEXT NOT NULL, username TEXT, business_id TEXT, token_expires_at BIGINT, connected_at BIGINT NOT NULL);`;
 const ready = (E.DATABASE_URL || E.POSTGRES_URL)
   ? pool.query(SCHEMA).catch(() => pool.query(SCHEMA)) // retry once if two cold starts race
   : Promise.reject(new Error('DATABASE_URL is not set. Connect Neon in Vercel Storage, then redeploy.'));
@@ -50,12 +53,16 @@ const json = async (r) => {
   if (!r.ok) throw new Error(JSON.stringify(j));
   return j;
 };
-const IG_API_VERSION = E.IG_API_VERSION;
-const ig = (body) => fetch(`https://graph.instagram.com/${IG_API_VERSION}/me/messages`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${E.IG_ACCESS_TOKEN}` },
-  body: JSON.stringify(body),
-}).then(json);
+const IG_API_VERSION = E.META_API_VERSION || E.IG_API_VERSION || 'v26.0';
+const ig = async (body) => {
+  const integration = await getInstagramIntegration(q);
+  const token = integration?.access_token || E.IG_ACCESS_TOKEN;
+  if (!token) throw new Error('Instagram is not connected. Open /auth/instagram to connect CustomPlate90.');
+  const endpoint = integration
+    ? `https://graph.facebook.com/${IG_API_VERSION}/${integration.ig_user_id}/messages`
+    : `https://graph.instagram.com/${IG_API_VERSION}/me/messages`;
+  return fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) }).then(json);
+};
 const rzp = (path, body) => fetch('https://api.razorpay.com/v1' + path, {
   method: body ? 'POST' : 'GET',
   headers: { 'Content-Type': 'application/json', Authorization: 'Basic ' + Buffer.from(`${E.RAZORPAY_KEY_ID}:${E.RAZORPAY_KEY_SECRET}`).toString('base64') },
@@ -105,8 +112,7 @@ const gemini = async (system, messages) => {
     return [];
   }) };
 };
-const fetchName = (id) => fetch(`https://graph.instagram.com/${IG_API_VERSION}/${id}?fields=username`, { headers: { Authorization: `Bearer ${E.IG_ACCESS_TOKEN}` } })
-  .then(json).then((u) => q('UPDATE convos SET username=$1 WHERE ig_id=$2', [u.username, id])).catch(() => {});
+const fetchName = (id) => E.IG_ACCESS_TOKEN ? fetch(`https://graph.instagram.com/${IG_API_VERSION}/${id}?fields=username`, { headers: { Authorization: `Bearer ${E.IG_ACCESS_TOKEN}` } }).then(json).then((u) => q('UPDATE convos SET username=$1 WHERE ig_id=$2', [u.username, id])).catch(() => {}) : Promise.resolve();
 
 // ---------- human-like sending ----------
 async function say(id, text) {
@@ -304,11 +310,12 @@ async function handleIncoming(id, rowId) {
 // ---------- http ----------
 const app = express();
 app.use(express.json({ verify: (req, _res, buf) => { req.raw = buf; } }));
+app.use('/auth/instagram', createInstagramOAuthRouter({ q, ready }));
 app.get('/', (_, res) => res.type('html').send(DASHBOARD)); // the page holds no data; /api needs the password
 app.get(['/privacy-policy', '/privacy-policy.html'], (_, res) => res.type('html').send(PRIVACY_POLICY));
 app.get('/dashboard', (_, res) => res.redirect('/'));
 app.get('/health', async (_, res) => {
-  try { await ready; await q('SELECT 1'); res.json({ ok: true, database: 'connected', configured: { instagram: Boolean(E.IG_API_VERSION && E.IG_ACCESS_TOKEN && E.IG_APP_SECRET && E.IG_VERIFY_TOKEN), gemini: Boolean(E.GEMINI_API_KEY), razorpay: Boolean(E.RAZORPAY_KEY_ID && E.RAZORPAY_KEY_SECRET && E.RAZORPAY_WEBHOOK_SECRET), resend: Boolean(E.RESEND_API_KEY && E.MAIL_FROM && E.OWNER_EMAIL), dashboard: Boolean(E.DASHBOARD_PASSWORD && E.DASHBOARD_PASSWORD.length >= 16) } }); }
+  try { await ready; await q('SELECT 1'); res.json({ ok: true, database: 'connected', configured: { instagram: Boolean((await getInstagramIntegration(q)) || (E.IG_API_VERSION && E.IG_ACCESS_TOKEN && E.IG_VERIFY_TOKEN)), instagramOAuth: Boolean(E.META_APP_ID && E.META_APP_SECRET && E.META_LOGIN_CONFIG_ID && E.META_TOKEN_ENCRYPTION_KEY), gemini: Boolean(E.GEMINI_API_KEY), razorpay: Boolean(E.RAZORPAY_KEY_ID && E.RAZORPAY_KEY_SECRET && E.RAZORPAY_WEBHOOK_SECRET), resend: Boolean(E.RESEND_API_KEY && E.MAIL_FROM && E.OWNER_EMAIL), dashboard: Boolean(E.DASHBOARD_PASSWORD && E.DASHBOARD_PASSWORD.length >= 16) } }); }
   catch (e) { res.status(500).json({ ok: false, error: String(e.message).slice(0, 150) }); }
 });
 app.use((req, res, next) => ready.then(() => next(), next));
@@ -318,8 +325,9 @@ app.get('/webhook/instagram', (req, res) =>
   req.query['hub.verify_token'] === E.IG_VERIFY_TOKEN ? res.send(req.query['hub.challenge']) : res.sendStatus(403));
 
 app.post('/webhook/instagram', (req, res) => {
-  if (!E.IG_APP_SECRET || !req.raw) return res.sendStatus(503);
-  const good = 'sha256=' + crypto.createHmac('sha256', E.IG_APP_SECRET).update(req.raw).digest('hex');
+  const appSecret = E.META_APP_SECRET || E.IG_APP_SECRET;
+  if (!appSecret || !req.raw) return res.sendStatus(503);
+  const good = 'sha256=' + crypto.createHmac('sha256', appSecret).update(req.raw).digest('hex');
   const sig = req.get('x-hub-signature-256') || '';
   if (sig.length !== good.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(good))) return res.sendStatus(401);
   res.sendStatus(200);
