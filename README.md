@@ -15,7 +15,8 @@ Instagram DM sales assistant for custom number-plate orders. It uses Google Gemi
 
 - Node.js 22+
 - Neon or another PostgreSQL database
-- Instagram Professional account and Meta app with Instagram Messaging permissions
+- Instagram Professional (Business or Creator) account in a Meta business portfolio
+- Meta app with an Instagram Login Compatible Unified Login configuration and Instagram messaging permissions
 - Google Gemini API key
 - Razorpay account with UPI QR Codes enabled
 - Resend account with a verified sender domain
@@ -36,7 +37,7 @@ For local testing, set `DELAY_SCALE=0`. Do not use test Razorpay keys for live c
 ## Vercel deployment
 
 1. Import this repository into Vercel.
-2. Add all required variables from `.env.example` in Project Settings → Environment Variables. Do not commit `.env`.
+2. Add all required variables from `.env.example` in Project Settings → Environment Variables. Do not commit `.env`. Set `META_APP_ID`, `META_APP_SECRET`, `META_LOGIN_CONFIG_ID`, `META_REDIRECT_URI`, and a 32-byte `META_TOKEN_ENCRYPTION_KEY`.
 3. Add/connect Neon Postgres and set `DATABASE_URL` (or `POSTGRES_URL`).
 4. Deploy. The app creates/updates its tables and indexes automatically on first startup.
 5. Check `/health` and verify all expected integrations show `true`.
