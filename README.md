@@ -51,23 +51,36 @@ For local testing, set `DELAY_SCALE=0`. Do not use test Razorpay keys for live c
 | `DASHBOARD_PASSWORD` | Dashboard password, minimum 16 chars; use 32+ random chars |
 | `GEMINI_API_KEY` | Google Gemini API key |
 | `GEMINI_MODEL` | Gemini model ID (default: `gemini-3.8-flash`) |
-| `IG_ACCESS_TOKEN` | Instagram API access token |
-| `IG_APP_SECRET` | Meta app secret for webhook signature validation |
+| `META_APP_ID`, `META_APP_SECRET` | Meta app credentials for Unified Login and webhook signatures |
+| `META_LOGIN_CONFIG_ID` | Instagram Login Compatible Unified Login configuration ID |
+| `META_API_VERSION` | Graph API version (default `v26.0`) |
+| `META_REDIRECT_URI` | Exact OAuth callback URL registered in Meta |
+| `META_TOKEN_ENCRYPTION_KEY` | 32-byte hex/base64 key used to encrypt the connected token in Postgres |
+| `APP_URL` | Public app origin used to build the OAuth callback URL |
 | `IG_VERIFY_TOKEN` | Random webhook verification token |
-| `IG_API_VERSION` | Current Graph API version supported by your Meta app (required; no stale default) |
+| `IG_ACCESS_TOKEN`, `IG_APP_SECRET` | Optional legacy Instagram Login fallback only |
 | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Razorpay API credentials |
 | `RAZORPAY_WEBHOOK_SECRET` | Secret configured on the Razorpay webhook |
 | `RESEND_API_KEY`, `MAIL_FROM`, `OWNER_EMAIL` | Order and owner notification email |
 | `PRICE_CAR`, `PRICE_BIKE` | Whole-rupee prices (defaults ₹1,200 and ₹700) |
 | `DELAY_SCALE` | Human-like delays; set `0` for testing |
 
-## Instagram webhook
+## Instagram Unified Login OAuth
 
-Callback URL: `https://YOUR_DOMAIN/webhook/instagram`
+This repository uses Instagram API with Unified Login (Facebook Login for Business configuration), not the standalone `graph.instagram.com` Instagram Login flow.
 
-Verify token: the exact value of `IG_VERIFY_TOKEN`.
+- OAuth start: `https://YOUR_DOMAIN/auth/instagram`
+- OAuth callback / registered redirect URI: `https://YOUR_DOMAIN/auth/instagram/callback`
+- Instagram webhook callback: `https://YOUR_DOMAIN/webhook/instagram` (not the OAuth redirect URI)
+- Webhook verify token: the exact value of `IG_VERIFY_TOKEN`.
 
-Subscribe to the `messages` webhook field. The Instagram account must be Professional. Meta app review/permissions may be required for customers outside app roles. Instagram's messaging window and policy restrictions still apply; the app does not bypass them.
+In Meta App Dashboard, select the Instagram API setup with Unified Login configuration labelled Instagram Login Compatible. Register the OAuth callback URL above as the redirect URI. Copy the Meta App ID, Meta App Secret and Configuration ID into Vercel. The configuration must include `instagram_basic` and `instagram_manage_messages`; permissions are selected in the Meta configuration, so the OAuth URL intentionally does not send a separate `scope` parameter.
+
+After deployment, open `/auth/instagram` and authorize the CustomPlate90 professional account. The callback exchanges the code, discovers the business portfolio and assigned Instagram account, subscribes it to the `messages` webhook field, and stores the token encrypted in Postgres. This implementation accepts exactly one assigned Instagram account to prevent connecting the wrong inbox. The account must be Business or Creator and shared from the selected business portfolio.
+
+Generate `META_TOKEN_ENCRYPTION_KEY` with `openssl rand -hex 32`. Keep it in Vercel Environment Variables only; never commit it. If you rotate this key, reconnect Instagram after migrating the stored token.
+
+The Meta webhook callback remains separate: set it to `https://YOUR_DOMAIN/webhook/instagram`, verify with `IG_VERIFY_TOKEN`, and subscribe to `messages`. Meta App Review / Advanced Access may be required for people outside app roles. Instagram's messaging window and policy restrictions still apply.
 
 ## Razorpay webhook
 
@@ -87,7 +100,7 @@ A screenshot or a customer's claim is never proof of payment. The app checks the
 
 ## Important production checks
 
-- Use a current Meta Graph API version and confirm the Instagram Login messaging endpoint/token scopes match your app configuration. `IG_API_VERSION` is configurable because Meta versions change.
+- Use a current Meta Graph API version and confirm the Unified Login configuration includes `instagram_basic` and `instagram_manage_messages`. `META_API_VERSION` is configurable because Meta versions change.
 - Confirm the configured Gemini model ID is available to your Google AI Studio API key.
 - Verify the exact Razorpay QR webhook payload and test captured/failed/duplicate event scenarios in test mode.
 - Configure log monitoring and database backups/retention. Customer chat history includes personal contact and delivery details; restrict database and dashboard access.
