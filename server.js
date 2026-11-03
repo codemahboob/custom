@@ -6,6 +6,7 @@ import { waitUntil } from '@vercel/functions';
 import DASHBOARD from './dashboard-html.js';
 import PRIVACY_POLICY from './privacy-policy.js';
 import { createInstagramOAuthRouter, getInstagramIntegration } from './instagram-oauth.js';
+import { safeEqual, verifyMetaWebhookSignature, normalizeInstagramMessageEvents } from './webhook-utils.js';
 
 const E = process.env;
 const PRICE = { car: Number(E.PRICE_CAR || 1200), bike: Number(E.PRICE_BIKE || 700) };
@@ -19,11 +20,6 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const sleep = (ms) => wait(ms * D);
 const rand = (a, b) => a + Math.random() * (b - a);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const safeEqual = (left, right) => {
-  const a = Buffer.from(String(left ?? ''), 'utf8');
-  const b = Buffer.from(String(right ?? ''), 'utf8');
-  return a.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b);
-};
 const NEED = ['vehicle', 'plate_text', 'name', 'phone', 'address'];
 const missing = (o) => NEED.filter((k) => !o[k]);
 const validPhone = (v) => /^[+0-9()\s-]{8,20}$/.test(String(v || '')) && String(v).replace(/\D/g, '').length >= 10;
@@ -446,8 +442,7 @@ app.post('/webhook/instagram', (req, res) => {
     console.error('[ig-webhook] rejected: signature verification not configured', requestId);
     return res.sendStatus(503);
   }
-  const expected = 'sha256=' + crypto.createHmac('sha256', appSecret).update(req.raw).digest('hex');
-  if (!/^sha256=[a-f0-9]{64}$/i.test(supplied) || !safeEqual(supplied.toLowerCase(), expected)) {
+  if (!verifyMetaWebhookSignature(req.raw, supplied, appSecret)) {
     console.error('[ig-webhook] rejected: signature mismatch', requestId);
     return res.sendStatus(401);
   }
@@ -457,61 +452,18 @@ app.post('/webhook/instagram', (req, res) => {
     return res.sendStatus(200);
   }
 
-  // Instagram Messaging webhooks normally arrive in entry.messaging[].
-  // Also normalize messages delivered through changes[].value when that value
-  // contains a complete sender/message event. Subscription-test notifications
-  // that only identify the changed field are intentionally not treated as DMs.
-  const messagingEvents = entries.flatMap((entry) =>
-    Array.isArray(entry?.messaging) ? entry.messaging : []
-  );
-  const changeEvents = entries.flatMap((entry) =>
-    (Array.isArray(entry?.changes) ? entry.changes : [])
-      .filter((change) => change?.field === 'messages')
-      .flatMap((change) => {
-        const value = change?.value;
-        if (!value || typeof value !== 'object') return [];
-        if (Array.isArray(value.messaging)) return value.messaging;
-        if (Array.isArray(value.messages)) {
-          return value.messages.map((message) => ({
-            ...value,
-            ...message,
-            sender: message?.sender || value.sender,
-            timestamp: message?.timestamp || value.timestamp,
-            message: message?.message || message,
-          }));
-        }
-        if (value.message && value.sender?.id) return [value];
-        if (value.sender?.id && (value.mid || value.message_id)) {
-          return [{
-            ...value,
-            message: {
-              mid: value.mid || value.message_id,
-              text: value.text,
-              attachments: value.attachments,
-              is_echo: value.is_echo,
-            },
-          }];
-        }
-        return [];
-      })
-  );
-  const allEvents = [...messagingEvents, ...changeEvents];
-  const events = allEvents.filter((event) =>
-    event?.message && !event.message.is_echo && event.sender?.id &&
-    (event.message.mid || event.message.message_id)
-  );
+  // Standard Instagram message events arrive in entry.messaging[]. We also
+  // accept a complete message event in changes[].value for compatibility with
+  // alternate webhook payload wrappers. Generic subscription-test changes are ignored.
+  const normalized = normalizeInstagramMessageEvents(body);
+  const { messagingEvents, changeEvents, allEvents, events } = normalized;
   console.info('[ig-webhook] parsed', JSON.stringify({
     requestId, objectType,
     messagingEvents: messagingEvents.length,
     changeMessageEvents: changeEvents.length,
     totalMessagingEvents: allEvents.length,
     acceptedMessageEvents: events.length,
-    ignored: {
-      noMessage: allEvents.filter((event) => !event?.message).length,
-      echo: allEvents.filter((event) => Boolean(event?.message?.is_echo)).length,
-      missingSender: allEvents.filter((event) => event?.message && !event.message.is_echo && !event.sender?.id).length,
-      missingMessageId: allEvents.filter((event) => event?.message && !event.message.is_echo && event.sender?.id && !(event.message.mid || event.message.message_id)).length,
-    },
+    ignored: normalized.ignored,
   }));
 
   res.sendStatus(200);
