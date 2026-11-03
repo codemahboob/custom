@@ -74,6 +74,15 @@ const ig = async (body) => {
     : `https://graph.instagram.com/${IG_API_VERSION}/me/messages`;
   return fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) }).then(json);
 };
+const subscribeInstagramWebhook = async () => {
+  const integration = await getInstagramIntegration(q);
+  const accountId = integration?.ig_user_id || E.IG_USER_ID;
+  const token = integration?.access_token || E.IG_ACCESS_TOKEN;
+  if (!accountId || !token) throw new Error('Set IG_USER_ID and a fresh Unified Login IG_ACCESS_TOKEN, or connect Instagram with /auth/instagram.');
+  const endpoint = new URL(`https://graph.facebook.com/${IG_API_VERSION}/${encodeURIComponent(accountId)}/subscribed_apps`);
+  endpoint.searchParams.set('subscribed_fields', 'messages');
+  return fetch(endpoint, { method: 'POST', headers: { Authorization: `Bearer ${token}` } }).then(json);
+};
 const rzp = (path, body) => fetch('https://api.razorpay.com/v1' + path, {
   method: body ? 'POST' : 'GET',
   headers: { 'Content-Type': 'application/json', Authorization: 'Basic ' + Buffer.from(`${E.RAZORPAY_KEY_ID}:${E.RAZORPAY_KEY_SECRET}`).toString('base64') },
@@ -417,6 +426,15 @@ app.use('/api', (req, res, next) => {
   if (expected.length >= 16 && actual.length === expected.length && crypto.timingSafeEqual(actual, expected)) return next();
   res.sendStatus(401);
 });
+app.get('/api/instagram/status', h(async (_, res) => {
+  const integration = await getInstagramIntegration(q);
+  const connected = Boolean(integration || (E.IG_USER_ID && E.IG_ACCESS_TOKEN));
+  res.json({ connected, username: integration?.username || null, account_id: integration?.ig_user_id || E.IG_USER_ID || null, webhook_signature_ready: Boolean(E.META_APP_SECRET || E.IG_APP_SECRET), verify_token_ready: Boolean(E.IG_VERIFY_TOKEN) });
+}));
+app.post('/api/instagram/subscribe', h(async (_, res) => {
+  const result = await subscribeInstagramWebhook();
+  res.json({ ok: Boolean(result.success), result });
+}));
 app.get('/api/data', h(async (_, res) => res.json({
   orders: (await q('SELECT * FROM orders ORDER BY id DESC LIMIT 200')).rows,
   convos: (await q('SELECT c.ig_id,c.username,c.paused,c.status,c.amount,c.order_json,c.updated_at,p.profile_json,p.memory_summary FROM convos c LEFT JOIN customer_profiles p USING(ig_id) ORDER BY c.updated_at DESC LIMIT 200')).rows,
