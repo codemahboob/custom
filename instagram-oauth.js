@@ -1,7 +1,7 @@
 import express from 'express';
 import crypto from 'node:crypto';
 
-const API_VERSION = (process.env.META_API_VERSION || 'v26.0').replace(/^v?/, 'v');
+const API_VERSION = `v${String(process.env.META_API_VERSION || 'v26.0').trim().replace(/^v/i, '')}`;
 const graph = (path) => `https://graph.facebook.com/${API_VERSION}/${path}`;
 const key = () => {
   const raw = String(process.env.META_TOKEN_ENCRYPTION_KEY || '').trim();
@@ -29,7 +29,7 @@ const readJson = async (response) => {
   return body;
 };
 const required = (...names) => {
-  const missing = names.filter((name) => !process.env[name]);
+  const missing = names.filter((name) => !String(process.env[name] || '').trim());
   if (missing.length) throw new Error(`Missing environment variables: ${missing.join(', ')}`);
 };
 
@@ -48,7 +48,8 @@ export async function getInstagramIntegration(q) {
 
 export function createInstagramOAuthRouter({ q, ready }) {
   const router = express.Router();
-  const redirectUri = () => process.env.META_REDIRECT_URI || `${process.env.APP_URL || 'https://custom-vert-zeta.vercel.app'}/auth/instagram/callback`;
+  const redirectUri = () => String(process.env.META_REDIRECT_URI || '').trim() ||
+    `${String(process.env.APP_URL || 'https://custom-vert-zeta.vercel.app').trim().replace(/\/+$/, '')}/auth/instagram/callback`;
 
   router.use(async (_req, _res, next) => {
     try {
@@ -93,7 +94,9 @@ export function createInstagramOAuthRouter({ q, ready }) {
       if (req.query.error) throw new Error(String(req.query.error_description || req.query.error).slice(0, 300));
       const code = String(req.query.code || '');
       const state = String(req.query.state || '');
-      if (!code || !state || state.length > 256) throw new Error('Meta did not return a valid authorization code and state.');
+      if (!code || code.length > 4096 || !state || state.length > 256) {
+        throw new Error('Meta did not return a valid authorization code and state.');
+      }
       const stateHash = crypto.createHash('sha256').update(state).digest('hex');
       const consumed = await q('DELETE FROM meta_oauth_states WHERE state_hash=$1 AND expires_at>$2 RETURNING state_hash', [stateHash, Date.now()]);
       if (!consumed.rowCount) throw new Error('Login state is invalid or expired. Start the connection again.');
@@ -129,8 +132,10 @@ export function createInstagramOAuthRouter({ q, ready }) {
 
       const subscribeUrl = new URL(graph(`${encodeURIComponent(account.id)}/subscribed_apps`));
       subscribeUrl.searchParams.set('subscribed_fields', 'messages');
-      subscribeUrl.searchParams.set('access_token', token.access_token);
-      await readJson(await fetch(subscribeUrl, { method: 'POST' }));
+      await readJson(await fetch(subscribeUrl, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token.access_token}` },
+      }));
 
       const expiresAt = token.expires_in ? Date.now() + Number(token.expires_in) * 1000 : null;
       await q(`INSERT INTO meta_integrations(provider,token_ciphertext,ig_user_id,username,business_id,token_expires_at,connected_at)
