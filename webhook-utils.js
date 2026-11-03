@@ -66,3 +66,20 @@ export function normalizeInstagramMessageEvents(body) {
   };
   return { entries, messagingEvents, changeEvents, allEvents, events, ignored };
 }
+
+/**
+ * Validate fields returned by Razorpay's payment fetch API.
+ * QR ownership must be established separately by finding this payment ID in
+ * GET /payments/qr_codes/:qr_id/payments; Razorpay payment entities do not
+ * expose qr_code_id as a documented response field.
+ */
+export function isCapturedInrPayment(payment, expectedPaymentId, expectedAmountPaise) {
+  return Boolean(
+    payment &&
+    String(payment.id || '') === String(expectedPaymentId || '') &&
+    payment.status === 'captured' &&
+    payment.currency === 'INR' &&
+    Number.isSafeInteger(expectedAmountPaise) &&
+    payment.amount === expectedAmountPaise
+  );
+}
