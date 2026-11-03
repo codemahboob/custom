@@ -9,12 +9,21 @@ import { createInstagramOAuthRouter, getInstagramIntegration } from './instagram
 
 const E = process.env;
 const PRICE = { car: Number(E.PRICE_CAR || 1200), bike: Number(E.PRICE_BIKE || 700) };
-if (!Number.isSafeInteger(PRICE.car) || PRICE.car < 1 || !Number.isSafeInteger(PRICE.bike) || PRICE.bike < 1) throw new Error('PRICE_CAR and PRICE_BIKE must be positive whole rupee amounts.');
-const D = E.DELAY_SCALE === undefined ? 1 : +E.DELAY_SCALE;
+if (!Number.isSafeInteger(PRICE.car) || PRICE.car < 1 || PRICE.car > Math.floor(Number.MAX_SAFE_INTEGER / 100) ||
+    !Number.isSafeInteger(PRICE.bike) || PRICE.bike < 1 || PRICE.bike > Math.floor(Number.MAX_SAFE_INTEGER / 100)) {
+  throw new Error('PRICE_CAR and PRICE_BIKE must be positive whole rupee amounts small enough to convert safely to paise.');
+}
+const D = E.DELAY_SCALE === undefined ? 1 : Number(E.DELAY_SCALE);
+if (!Number.isFinite(D) || D < 0 || D > 3) throw new Error('DELAY_SCALE must be a number between 0 and 3.');
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const sleep = (ms) => wait(ms * D);
 const rand = (a, b) => a + Math.random() * (b - a);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const safeEqual = (left, right) => {
+  const a = Buffer.from(String(left ?? ''), 'utf8');
+  const b = Buffer.from(String(right ?? ''), 'utf8');
+  return a.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b);
+};
 const NEED = ['vehicle', 'plate_text', 'name', 'phone', 'address'];
 const missing = (o) => NEED.filter((k) => !o[k]);
 const validPhone = (v) => /^[+0-9()\s-]{8,20}$/.test(String(v || '')) && String(v).replace(/\D/g, '').length >= 10;
@@ -29,7 +38,28 @@ CREATE TABLE IF NOT EXISTS msgs(id BIGSERIAL PRIMARY KEY, ig_id TEXT NOT NULL, r
 CREATE TABLE IF NOT EXISTS orders(id BIGSERIAL PRIMARY KEY, ig_id TEXT NOT NULL, username TEXT, order_json TEXT NOT NULL, amount INT NOT NULL, payment_id TEXT UNIQUE NOT NULL, paid_at BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS customer_profiles(ig_id TEXT PRIMARY KEY, username TEXT, profile_json JSONB NOT NULL DEFAULT '{}'::jsonb, memory_summary TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL);
 ALTER TABLE convos ADD COLUMN IF NOT EXISTS memory_summary TEXT NOT NULL DEFAULT '';
+ALTER TABLE convos ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE convos ADD COLUMN IF NOT EXISTS paused INT NOT NULL DEFAULT 0;
+ALTER TABLE convos ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'chatting';
+ALTER TABLE convos ADD COLUMN IF NOT EXISTS order_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE convos ADD COLUMN IF NOT EXISTS qr_id TEXT;
+ALTER TABLE convos ADD COLUMN IF NOT EXISTS amount INT;
+ALTER TABLE convos ADD COLUMN IF NOT EXISTS updated_at BIGINT;
+ALTER TABLE convos ADD COLUMN IF NOT EXISTS lock_until BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE msgs ADD COLUMN IF NOT EXISTS mid TEXT;
+ALTER TABLE msgs ADD COLUMN IF NOT EXISTS ts BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS amount INT NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_id TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS profile_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS memory_summary TEXT NOT NULL DEFAULT '';
+ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS created_at BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE customer_profiles ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS msgs_ig ON msgs(ig_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS msgs_mid_unique ON msgs(mid) WHERE mid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS orders_ig ON orders(ig_id, paid_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS orders_payment_id_unique ON orders(payment_id) WHERE payment_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS convos_updated ON convos(updated_at DESC);
@@ -342,7 +372,17 @@ async function handleIncoming(id, rowId) {
 
 // ---------- http ----------
 const app = express();
-app.use(express.json({ verify: (req, _res, buf) => { req.raw = buf; } }));
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'X-Frame-Options': 'DENY',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  });
+  next();
+});
+app.use(express.json({ limit: '1mb', verify: (req, _res, buf) => { req.raw = buf; } }));
 app.use('/auth/instagram', createInstagramOAuthRouter({ q, ready }));
 app.get('/', (_, res) => res.type('html').send(DASHBOARD)); // the page holds no data; /api needs the password
 app.get(['/privacy-policy', '/privacy-policy.html'], (_, res) => res.type('html').send(PRIVACY_POLICY));
@@ -352,7 +392,7 @@ app.get('/health', async (_, res) => {
     await ready; await q('SELECT 1');
     const integration = await getInstagramIntegration(q);
     res.json({ ok: true, database: 'connected', configured: {
-      instagram: Boolean(integration || (E.IG_API_VERSION && E.IG_ACCESS_TOKEN && E.IG_VERIFY_TOKEN)),
+      instagram: Boolean(integration || (E.IG_USER_ID && E.IG_ACCESS_TOKEN)),
       instagramOAuth: Boolean(E.META_APP_ID && E.META_APP_SECRET && E.META_LOGIN_CONFIG_ID && E.META_TOKEN_ENCRYPTION_KEY),
       instagramWebhook: Boolean(E.IG_VERIFY_TOKEN && (E.META_APP_SECRET || E.IG_APP_SECRET)),
       instagramInbox: Boolean(integration || (E.IG_USER_ID && E.IG_ACCESS_TOKEN)),
@@ -363,17 +403,29 @@ app.get('/health', async (_, res) => {
     } });
   } catch (e) { res.status(500).json({ ok: false, error: String(e.message).slice(0, 150) }); }
 });
+// Meta's verification handshake is intentionally independent of database health.
+app.get('/webhook/instagram', (req, res) => {
+  const mode = String(req.query['hub.mode'] || '');
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+  if (mode !== 'subscribe' || !String(E.IG_VERIFY_TOKEN || '').trim() ||
+      !safeEqual(token, E.IG_VERIFY_TOKEN) || typeof challenge !== 'string' || !challenge) {
+    return res.sendStatus(403);
+  }
+  return res.status(200).type('text/plain').send(challenge);
+});
+
 app.use((req, res, next) => ready.then(() => next(), next));
 const h = (fn) => (req, res, next) => fn(req, res).catch(next);
-
-app.get('/webhook/instagram', (req, res) =>
-  req.query['hub.verify_token'] === E.IG_VERIFY_TOKEN ? res.send(req.query['hub.challenge']) : res.sendStatus(403));
 
 app.post('/webhook/instagram', (req, res) => {
   const requestId = req.get('x-vercel-id') || crypto.randomUUID();
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const entries = Array.isArray(body.entry) ? body.entry : [];
-  const appSecret = E.META_APP_SECRET || E.IG_APP_SECRET;
+  const metaSecret = String(E.META_APP_SECRET || '').trim();
+  const legacySecret = String(E.IG_APP_SECRET || '').trim();
+  const appSecret = metaSecret || legacySecret;
+  const appSecretSource = metaSecret ? 'META_APP_SECRET' : (legacySecret ? 'IG_APP_SECRET' : null);
   const supplied = req.get('x-hub-signature-256') || '';
 
   // Metadata only: never log message text, access tokens, or app secrets.
@@ -382,7 +434,12 @@ app.post('/webhook/instagram', (req, res) => {
     entryKeys: entries.slice(0, 10).map((entry) => Object.keys(entry || {})),
     messagingCounts: entries.slice(0, 10).map((entry) => Array.isArray(entry?.messaging) ? entry.messaging.length : 0),
     changeFields: entries.slice(0, 10).flatMap((entry) => Array.isArray(entry?.changes) ? entry.changes.map((change) => change?.field || 'unknown') : []),
-    signaturePresent: Boolean(supplied), appSecretConfigured: Boolean(appSecret),
+    signaturePresent: Boolean(supplied), appSecretConfigured: Boolean(appSecret), appSecretSource,
+    changeValueKeys: entries.slice(0, 10).flatMap((entry) =>
+      (Array.isArray(entry?.changes) ? entry.changes : []).map((change) =>
+        change?.value && typeof change.value === 'object' ? Object.keys(change.value) : []
+      )
+    ),
   }));
 
   if (!appSecret || !req.raw) {
@@ -390,7 +447,7 @@ app.post('/webhook/instagram', (req, res) => {
     return res.sendStatus(503);
   }
   const expected = 'sha256=' + crypto.createHmac('sha256', appSecret).update(req.raw).digest('hex');
-  if (supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) {
+  if (!/^sha256=[a-f0-9]{64}$/i.test(supplied) || !safeEqual(supplied.toLowerCase(), expected)) {
     console.error('[ig-webhook] rejected: signature mismatch', requestId);
     return res.sendStatus(401);
   }
@@ -487,14 +544,15 @@ app.post('/webhook/instagram', (req, res) => {
 });
 
 app.post('/webhook/razorpay', (req, res) => {
-  if (!E.RAZORPAY_WEBHOOK_SECRET || !req.raw) return res.sendStatus(503);
-  const sig = crypto.createHmac('sha256', E.RAZORPAY_WEBHOOK_SECRET).update(req.raw).digest('hex');
+  if (!String(E.RAZORPAY_WEBHOOK_SECRET || '').trim() || !req.raw) return res.sendStatus(503);
+  const sig = crypto.createHmac('sha256', String(E.RAZORPAY_WEBHOOK_SECRET).trim()).update(req.raw).digest('hex');
   const supplied = req.get('x-razorpay-signature') || '';
-  if (supplied.length !== sig.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(sig))) return res.sendStatus(401);
+  if (!/^[a-f0-9]{64}$/i.test(supplied) || !safeEqual(supplied.toLowerCase(), sig)) return res.sendStatus(401);
+  if (req.body?.event !== 'qr_code.credited') return res.sendStatus(200);
+  const qrId = req.body?.payload?.qr_code?.entity?.id;
+  const pay = req.body?.payload?.payment?.entity;
+  if (!qrId || !pay?.id) return res.sendStatus(400);
   res.sendStatus(200);
-  if (req.body.event !== 'qr_code.credited') return;
-  const qrId = req.body.payload.qr_code.entity.id;
-  const pay = req.body.payload.payment.entity;
   waitUntil((async () => {
     const c = (await q('SELECT * FROM convos WHERE qr_id=$1', [qrId])).rows[0];
     if (!c) return void (await mail('Unmatched Razorpay payment', `<p>Payment ${esc(pay.id)} (₹${pay.amount / 100}) on QR ${esc(qrId)} matches no chat.</p>`));
@@ -514,31 +572,74 @@ app.use('/api', (req, res, next) => {
 app.get('/api/instagram/status', h(async (_, res) => {
   const integration = await getInstagramIntegration(q);
   const connected = Boolean(integration || (E.IG_USER_ID && E.IG_ACCESS_TOKEN));
-  res.json({ connected, username: integration?.username || null, account_id: integration?.ig_user_id || E.IG_USER_ID || null, webhook_signature_ready: Boolean(E.META_APP_SECRET || E.IG_APP_SECRET), verify_token_ready: Boolean(E.IG_VERIFY_TOKEN) });
+  res.json({
+    connected,
+    username: integration?.username || null,
+    account_id: integration?.ig_user_id || E.IG_USER_ID || null,
+    webhook_signature_ready: Boolean(String(E.META_APP_SECRET || E.IG_APP_SECRET || '').trim()),
+    verify_token_ready: Boolean(String(E.IG_VERIFY_TOKEN || '').trim()),
+  });
 }));
 app.post('/api/instagram/subscribe', h(async (_, res) => {
   const result = await subscribeInstagramWebhook();
   res.json({ ok: Boolean(result.success), result });
 }));
+app.get('/api/metrics', h(async (req, res) => {
+  const start = req.query.start === undefined ? 0 : Number(req.query.start);
+  const end = Date.now();
+  if (!Number.isSafeInteger(start) || start < 0 || start > end) {
+    return res.status(400).json({ error: 'Invalid metrics start time.' });
+  }
+  const [conversations, orders] = await Promise.all([
+    q(`SELECT
+      COUNT(*) FILTER (WHERE $1::bigint = 0 OR (updated_at >= $1 AND updated_at <= $2)) AS conversations,
+      COUNT(*) FILTER (WHERE status='awaiting_payment' AND ($1::bigint = 0 OR (updated_at >= $1 AND updated_at <= $2))) AS pending_payments
+      FROM convos`, [start, end]),
+    q(`SELECT COUNT(*) AS paid_orders, COALESCE(SUM(amount), 0) AS revenue
+      FROM orders WHERE $1::bigint = 0 OR (paid_at >= $1 AND paid_at <= $2)`, [start, end]),
+  ]);
+  const c = conversations.rows[0] || {};
+  const o = orders.rows[0] || {};
+  res.json({
+    revenue: Number(o.revenue || 0),
+    conversations: Number(c.conversations || 0),
+    paid_orders: Number(o.paid_orders || 0),
+    pending_payments: Number(c.pending_payments || 0),
+  });
+}));
 app.get('/api/data', h(async (_, res) => res.json({
-  orders: (await q('SELECT * FROM orders ORDER BY id DESC LIMIT 200')).rows,
-  convos: (await q('SELECT c.ig_id,c.username,c.paused,c.status,c.amount,c.order_json,c.updated_at,p.profile_json,p.memory_summary FROM convos c LEFT JOIN customer_profiles p USING(ig_id) ORDER BY c.updated_at DESC LIMIT 200')).rows,
+  // Return only fields the inbox needs; full order and customer details stay behind the dedicated customer endpoint.
+  convos: (await q('SELECT ig_id,username,paused,status,updated_at FROM convos ORDER BY updated_at DESC LIMIT 200')).rows,
 })));
 app.get('/api/msgs/:id', h(async (req, res) => res.json((await q('SELECT role,text,ts,mid FROM msgs WHERE ig_id=$1 ORDER BY id DESC LIMIT 500', [req.params.id])).rows.reverse())));
-app.get('/api/customer/:id', h(async (req, res) => { const id = req.params.id; const [profile, orders] = await Promise.all([getProfile(id), q('SELECT order_json,amount,payment_id,paid_at FROM orders WHERE ig_id=$1 ORDER BY paid_at DESC LIMIT 50', [id])]); res.json({ profile: profile?.profile_json || {}, summary: profile?.memory_summary || '', orders: orders.rows }); }));
+app.get('/api/customer/:id', h(async (req, res) => {
+  const id = String(req.params.id || '');
+  if (!/^\d{1,32}$/.test(id)) return res.status(400).json({ error: 'Invalid Instagram customer ID.' });
+  const [profile, orders] = await Promise.all([
+    getProfile(id),
+    q('SELECT order_json,amount,payment_id,paid_at FROM orders WHERE ig_id=$1 ORDER BY paid_at DESC LIMIT 50', [id]),
+  ]);
+  res.json({ profile: profile?.profile_json || {}, summary: profile?.memory_summary || '', orders: orders.rows });
+}));
 app.post('/api/reply/:id', h(async (req, res) => {
   const id = String(req.params.id || '').trim();
   const text = String(req.body?.text || '').trim();
-  if (!id || !text) return res.status(400).json({ error: 'Customer and message text are required.' });
+  if (!/^\d{1,32}$/.test(id) || !text) return res.status(400).json({ error: 'A valid Instagram customer ID and message text are required.' });
   if (Buffer.byteLength(text, 'utf8') > 1000) return res.status(400).json({ error: 'Instagram message text must be 1,000 bytes or fewer.' });
-  const latest = (await q("SELECT ts FROM msgs WHERE ig_id=$1 AND role='user' ORDER BY id DESC LIMIT 1", [id])).rows[0];
-  if (!latest || Date.now() - Number(latest.ts) > 24 * 60 * 60 * 1000) return res.status(409).json({ error: 'The Instagram 24-hour reply window is closed. Ask the customer to message your account again.' });
+  try { await assertMessagingWindow(id); }
+  catch (error) { return res.status(409).json({ error: error.message }); }
   const sent = await ig({ recipient: { id }, message: { text } });
   await addMsg(id, 'assistant', text, sent.message_id || null);
   await q('UPDATE convos SET updated_at=$1 WHERE ig_id=$2', [Date.now(), id]);
   res.json({ ok: true, message_id: sent.message_id || null });
 }));
-app.post('/api/pause/:id', h(async (req, res) => { await q('UPDATE convos SET paused=1-paused WHERE ig_id=$1', [req.params.id]); res.sendStatus(204); }));
+app.post('/api/pause/:id', h(async (req, res) => {
+  const id = String(req.params.id || '');
+  if (!/^\d{1,32}$/.test(id)) return res.status(400).json({ error: 'Invalid Instagram customer ID.' });
+  const result = await q('UPDATE convos SET paused=1-paused WHERE ig_id=$1', [id]);
+  if (!result.rowCount) return res.sendStatus(404);
+  return res.sendStatus(204);
+}));
 
 app.use((err, _req, res, _next) => { console.error(err.message); res.status(500).send('server error'); });
 if (!E.VERCEL) app.listen(E.PORT || 3000, () => console.log('plate-dm-agent running on', E.PORT || 3000));
