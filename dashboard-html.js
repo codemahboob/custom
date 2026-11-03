@@ -26,6 +26,8 @@ h1{font-size:clamp(34px,7vw,52px);line-height:.88;letter-spacing:-2.8px;font-wei
 footer{border-top:1.5px solid var(--rule);margin-top:18px;padding-top:12px;display:flex;justify-content:space-between;font-size:9px;letter-spacing:1px;font-weight:800;color:var(--muted)}
 .connect{display:inline-block;margin-left:auto;margin-right:12px;padding:10px 11px;border:1.5px solid var(--blue);color:var(--blue);text-decoration:none;font:800 10px/1 Inter,ui-sans-serif,system-ui,sans-serif;letter-spacing:.35px}.connect:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
 .error{font-size:12px;color:#9b2929;margin-top:18px;min-height:18px}
+.inbox{margin-top:54px;border-top:1.5px solid var(--rule);padding-top:20px}.inbox-top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.inbox-kicker{font-size:10px;font-weight:850;letter-spacing:.5px;color:var(--muted)}.inbox h2{font-size:21px;line-height:1;margin:5px 0 0;letter-spacing:-.8px}.inbox button{border:1.5px solid var(--blue);background:transparent;color:var(--blue);padding:10px 12px;font:800 10px/1 Inter,ui-sans-serif,system-ui,sans-serif;letter-spacing:.35px;cursor:pointer}.inbox button:disabled{opacity:.45;cursor:not-allowed}.inbox-grid{display:grid;grid-template-columns:minmax(180px,250px) minmax(0,1fr);border:1.5px solid var(--rule);min-height:420px}.thread-list{border-right:1.5px solid var(--rule);max-height:560px;overflow:auto}.thread-item{display:block;width:100%;text-align:left;border:0!important;border-bottom:1px solid #d0cec5!important;padding:13px 12px!important;color:var(--ink)!important;letter-spacing:0!important}.thread-item.active{background:#e9e7df!important;border-left:4px solid var(--blue)!important;padding-left:8px!important}.thread-name{display:block;font-size:12px;font-weight:850;overflow-wrap:anywhere}.thread-sub{display:block;margin-top:5px;font-size:10px;color:var(--muted);font-weight:600}.chat-panel{min-width:0;display:flex;flex-direction:column}.chat-head{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:12px;border-bottom:1.5px solid var(--rule)}.chat-head strong{display:block;font-size:12px;overflow-wrap:anywhere}.chat-head small{display:block;margin-top:4px;color:var(--muted);font-size:10px}.chat-messages{height:330px;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:9px;background:#fbfaf6}.bubble{max-width:88%;padding:9px 11px;font-size:12px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.user{align-self:flex-start;background:#e9e7df;color:var(--ink)}.bubble.assistant{align-self:flex-end;background:var(--blue);color:white}.bubble time{display:block;margin-top:5px;font-size:9px;opacity:.7}.reply-form{display:flex;gap:8px;padding:10px;border-top:1px solid #d0cec5}.reply-form textarea{flex:1;min-width:0;resize:vertical;min-height:42px;max-height:110px;border:1.5px solid var(--rule);border-radius:0;background:transparent;padding:10px;font:12px Inter,system-ui,sans-serif;color:var(--ink)}.reply-form button{align-self:stretch}.inbox-error{min-height:18px;margin:0;padding:0 10px 8px;color:#9b2929;font-size:10px}.inbox-note{padding:12px;color:var(--muted);font-size:11px}.inbox button:focus-visible,.reply-form textarea:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+@media(max-width:600px){.inbox-grid{grid-template-columns:1fr}.thread-list{border-right:0;border-bottom:1.5px solid var(--rule);max-height:190px}.chat-messages{height:340px}.chat-head{align-items:flex-start}.inbox h2{font-size:18px}}
 @media(max-width:480px){main{padding:24px 20px 34px}header{margin-bottom:30px}.intro{grid-template-columns:42px 1fr;gap:12px;margin-bottom:58px}.index{font-size:26px}h1{font-size:clamp(31px,9vw,42px);letter-spacing:-2px}.metric-value{font-size:clamp(52px,15vw,68px);letter-spacing:-3.5px}.metric{margin-bottom:11px;padding-bottom:9px}}
 </style>
 </head>
@@ -58,18 +60,33 @@ footer{border-top:1.5px solid var(--rule);margin-top:18px;padding-top:12px;displ
     <div class="metric-value" id="pending">—</div>
   </div>
 </section>
+<section class="inbox" aria-label="Instagram inbox">
+  <div class="inbox-top">
+    <div><div class="inbox-kicker">05 — CUSTOMER MESSAGES</div><h2>INSTAGRAM INBOX</h2></div>
+    <button id="refresh-inbox" type="button">REFRESH</button>
+  </div>
+  <div class="inbox-grid">
+    <aside class="thread-list" id="thread-list" aria-label="Conversations"><div class="inbox-note">Loading conversations…</div></aside>
+    <section class="chat-panel" aria-label="Selected conversation">
+      <div class="chat-head"><div><strong id="chat-name">Choose a conversation</strong><small id="chat-meta">Customer history appears here</small></div><button id="pause-chat" type="button" disabled>PAUSE BOT</button></div>
+      <div class="chat-messages" id="chat-messages"><div class="inbox-note">Select a conversation to view messages.</div></div>
+      <form class="reply-form" id="reply-form"><textarea id="reply-text" maxlength="1000" placeholder="Write a reply…" aria-label="Reply text" disabled></textarea><button id="send-reply" type="submit" disabled>SEND</button></form>
+      <p class="inbox-error" id="inbox-error" role="status"></p>
+    </section>
+  </div>
+</section>
 <footer><span>CUSTOMPLATE</span><span id="updated">LOADING</span></footer>
 <div class="error" id="error" role="status"></div>
 </main>
 <script>
 let password=sessionStorage.getItem('pw')||'';
-async function api(url){
+async function api(url,options={}){
   for(;;){
     if(!password){password=prompt('Dashboard password')||'';if(!password)throw new Error('Dashboard password is required.');}
     const auth=btoa(String.fromCharCode(...new TextEncoder().encode('admin:'+password)));
-    const response=await fetch(url,{headers:{Authorization:'Basic '+auth}});
+    const response=await fetch(url,{...options,headers:{...(options.headers||{}),Authorization:'Basic '+auth}});
     if(response.status===401){password='';sessionStorage.removeItem('pw');continue;}
-    if(!response.ok)throw new Error('Unable to load dashboard data ('+response.status+').');
+    if(!response.ok){let message='Request failed ('+response.status+').';try{const payload=await response.clone().json();if(payload.error)message=payload.error;}catch{}throw new Error(message);}
     sessionStorage.setItem('pw',password);
     return response;
   }
@@ -108,6 +125,62 @@ async function refresh(){
   }
 }
 document.getElementById('date-range').addEventListener('change',refresh);
+let selectedConversation=null;
+let conversationCache=[];
+const threadList=document.getElementById('thread-list');
+const chatMessages=document.getElementById('chat-messages');
+const chatName=document.getElementById('chat-name');
+const chatMeta=document.getElementById('chat-meta');
+const inboxError=document.getElementById('inbox-error');
+const replyText=document.getElementById('reply-text');
+const sendReply=document.getElementById('send-reply');
+const pauseChat=document.getElementById('pause-chat');
+const safeText=value=>String(value??'');
+function renderThreads(){
+  threadList.replaceChildren();
+  if(!conversationCache.length){const empty=document.createElement('div');empty.className='inbox-note';empty.textContent='No Instagram conversations yet.';threadList.append(empty);return;}
+  for(const convo of conversationCache){
+    const button=document.createElement('button');button.type='button';button.className='thread-item'+(convo.ig_id===selectedConversation?' active':'');
+    const name=document.createElement('span');name.className='thread-name';name.textContent=convo.username?'@'+convo.username:convo.ig_id;
+    const sub=document.createElement('span');sub.className='thread-sub';sub.textContent=(convo.paused?'BOT PAUSED · ':'')+(convo.status||'chatting').replaceAll('_',' ').toUpperCase();
+    button.append(name,sub);button.addEventListener('click',()=>selectConversation(convo.ig_id));threadList.append(button);
+  }
+}
+async function loadMessages(id){
+  const response=await api('/api/msgs/'+encodeURIComponent(id));const messages=await response.json();chatMessages.replaceChildren();
+  if(!messages.length){const empty=document.createElement('div');empty.className='inbox-note';empty.textContent='No saved messages in this chat yet.';chatMessages.append(empty);return;}
+  for(const message of messages){
+    const bubble=document.createElement('div');bubble.className='bubble '+(message.role==='assistant'?'assistant':'user');
+    const body=document.createElement('div');body.textContent=safeText(message.text);bubble.append(body);
+    if(message.ts){const time=document.createElement('time');const stamp=Number(message.ts);time.textContent=new Date(stamp<1e12?stamp*1000:stamp).toLocaleString();bubble.append(time);}
+    chatMessages.append(bubble);
+  }
+  chatMessages.scrollTop=chatMessages.scrollHeight;
+}
+async function selectConversation(id){
+  selectedConversation=id;const convo=conversationCache.find(item=>item.ig_id===id);
+  chatName.textContent=convo?.username?'@'+convo.username:id;chatMeta.textContent=(convo?.status||'chatting').replaceAll('_',' ')+' · '+(convo?.paused?'Bot paused':'Bot active');
+  pauseChat.disabled=false;pauseChat.textContent=convo?.paused?'RESUME BOT':'PAUSE BOT';replyText.disabled=false;sendReply.disabled=false;renderThreads();inboxError.textContent='';
+  try{await loadMessages(id);}catch(error){inboxError.textContent=error.message;}
+}
+async function refreshInbox(){
+  try{const response=await api('/api/data');const data=await response.json();conversationCache=Array.isArray(data.convos)?data.convos:[];renderThreads();
+    if(selectedConversation&&!conversationCache.some(item=>item.ig_id===selectedConversation))selectedConversation=null;
+    if(!selectedConversation&&conversationCache.length)selectedConversation=conversationCache[0].ig_id;
+    if(selectedConversation)await selectConversation(selectedConversation);
+  }catch(error){inboxError.textContent=error.message;}
+}
+document.getElementById('refresh-inbox').addEventListener('click',refreshInbox);
+document.getElementById('reply-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(!selectedConversation)return;const text=replyText.value.trim();if(!text)return;
+  sendReply.disabled=true;inboxError.textContent='Sending…';
+  try{await api('/api/reply/'+encodeURIComponent(selectedConversation),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});replyText.value='';await loadMessages(selectedConversation);inboxError.textContent='Message sent.';}
+  catch(error){inboxError.textContent=error.message;}
+  finally{sendReply.disabled=false;}
+});
+pauseChat.addEventListener('click',async()=>{if(!selectedConversation)return;pauseChat.disabled=true;try{await api('/api/pause/'+encodeURIComponent(selectedConversation),{method:'POST'});await refreshInbox();}catch(error){inboxError.textContent=error.message;}finally{pauseChat.disabled=false;}});
+refreshInbox();
+setInterval(refreshInbox,20000);
 refresh();
 setInterval(refresh,15000);
 </script>
