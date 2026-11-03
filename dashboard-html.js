@@ -63,7 +63,7 @@ footer{border-top:1.5px solid var(--rule);margin-top:18px;padding-top:12px;displ
 <section class="inbox" aria-label="Instagram inbox">
   <div class="inbox-top">
     <div><div class="inbox-kicker">05 — CUSTOMER MESSAGES</div><h2>INSTAGRAM INBOX</h2></div>
-    <button id="refresh-inbox" type="button">REFRESH</button>
+    <div style="display:flex;gap:7px"><button id="subscribe-inbox" type="button">ENABLE WEBHOOKS</button><button id="refresh-inbox" type="button">REFRESH</button></div>
   </div>
   <div class="inbox-grid">
     <aside class="thread-list" id="thread-list" aria-label="Conversations"><div class="inbox-note">Loading conversations…</div></aside>
@@ -171,6 +171,12 @@ async function refreshInbox(){
   }catch(error){inboxError.textContent=error.message;}
 }
 document.getElementById('refresh-inbox').addEventListener('click',refreshInbox);
+document.getElementById('subscribe-inbox').addEventListener('click',async()=>{
+  const button=document.getElementById('subscribe-inbox');button.disabled=true;inboxError.textContent='Subscribing this Instagram account to message webhooks…';
+  try{const response=await api('/api/instagram/subscribe',{method:'POST'});const result=await response.json();inboxError.textContent=result.ok?'Instagram message webhook subscription enabled.':'Meta did not confirm the subscription; check the app webhook settings.';}
+  catch(error){inboxError.textContent=error.message;}
+  finally{button.disabled=false;}
+});
 document.getElementById('reply-form').addEventListener('submit',async event=>{
   event.preventDefault();if(!selectedConversation)return;const text=replyText.value.trim();if(!text)return;
   sendReply.disabled=true;inboxError.textContent='Sending…';
