@@ -96,12 +96,14 @@ const json = async (r) => {
   if (!r.ok) throw new Error(JSON.stringify(j));
   return j;
 };
-const IG_API_VERSION = E.META_API_VERSION || E.IG_API_VERSION || 'v26.0';
+const apiVersionSetting = String(E.META_API_VERSION || E.IG_API_VERSION || 'v26.0').trim() || 'v26.0';
+const IG_API_VERSION = `v${apiVersionSetting.replace(/^v/i, '')}`;
+if (!/^v\d+\.\d+$/.test(IG_API_VERSION)) throw new Error('META_API_VERSION or IG_API_VERSION must look like v26.0.');
 const assertMessagingWindow = async (recipientId) => {
   const lastInbound = (await q("SELECT ts FROM msgs WHERE ig_id=$1 AND role='user' ORDER BY id DESC LIMIT 1", [recipientId])).rows[0];
   if (!lastInbound) throw new Error('Cannot message this Instagram user before they message your account.');
   const age = Date.now() - Number(lastInbound.ts);
-  if (age < -5 * 60 * 1000 || age > 24 * 60 * 60 * 1000) {
+  if (age < -5 * 60 * 1000 || age >= 24 * 60 * 60 * 1000) {
     throw new Error('Instagram standard 24-hour messaging window has expired. Ask the customer to message your account again before replying.');
   }
 };
