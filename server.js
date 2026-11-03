@@ -370,16 +370,50 @@ app.get('/webhook/instagram', (req, res) =>
   req.query['hub.verify_token'] === E.IG_VERIFY_TOKEN ? res.send(req.query['hub.challenge']) : res.sendStatus(403));
 
 app.post('/webhook/instagram', (req, res) => {
+  const requestId = req.get('x-vercel-id') || crypto.randomUUID();
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const entries = Array.isArray(body.entry) ? body.entry : [];
   const appSecret = E.META_APP_SECRET || E.IG_APP_SECRET;
-  if (!appSecret || !req.raw) return res.sendStatus(503);
-  const expected = 'sha256=' + crypto.createHmac('sha256', appSecret).update(req.raw).digest('hex');
   const supplied = req.get('x-hub-signature-256') || '';
-  if (supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) return res.sendStatus(401);
-  if (!['instagram', 'page'].includes(String(req.body?.object || 'instagram'))) return res.sendStatus(200);
+
+  // Metadata only: never log message text, access tokens, or app secrets.
+  console.info('[ig-webhook] received', JSON.stringify({
+    requestId, object: body.object || null, entryCount: entries.length,
+    entryKeys: entries.slice(0, 10).map((entry) => Object.keys(entry || {})),
+    messagingCounts: entries.slice(0, 10).map((entry) => Array.isArray(entry?.messaging) ? entry.messaging.length : 0),
+    changeFields: entries.slice(0, 10).flatMap((entry) => Array.isArray(entry?.changes) ? entry.changes.map((change) => change?.field || 'unknown') : []),
+    signaturePresent: Boolean(supplied), appSecretConfigured: Boolean(appSecret),
+  }));
+
+  if (!appSecret || !req.raw) {
+    console.error('[ig-webhook] rejected: signature verification not configured', requestId);
+    return res.sendStatus(503);
+  }
+  const expected = 'sha256=' + crypto.createHmac('sha256', appSecret).update(req.raw).digest('hex');
+  if (supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) {
+    console.error('[ig-webhook] rejected: signature mismatch', requestId);
+    return res.sendStatus(401);
+  }
+  const objectType = String(body.object || '');
+  if (!['instagram', 'page'].includes(objectType)) {
+    console.warn('[ig-webhook] acknowledged unsupported object', JSON.stringify({ requestId, objectType }));
+    return res.sendStatus(200);
+  }
+
+  const allEvents = entries.flatMap((entry) => Array.isArray(entry?.messaging) ? entry.messaging : []);
+  const events = allEvents.filter((event) => event?.message && !event.message.is_echo && event.sender?.id && event.message.mid);
+  console.info('[ig-webhook] parsed', JSON.stringify({
+    requestId, objectType, totalMessagingEvents: allEvents.length,
+    acceptedMessageEvents: events.length,
+    ignored: {
+      noMessage: allEvents.filter((event) => !event?.message).length,
+      echo: allEvents.filter((event) => Boolean(event?.message?.is_echo)).length,
+      missingSender: allEvents.filter((event) => event?.message && !event.message.is_echo && !event.sender?.id).length,
+      missingMessageId: allEvents.filter((event) => event?.message && !event.message.is_echo && event.sender?.id && !event.message.mid).length,
+    },
+  }));
+
   res.sendStatus(200);
-  const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
-  const events = entries.flatMap((entry) => Array.isArray(entry.messaging) ? entry.messaging : [])
-    .filter((event) => event.message && !event.message.is_echo && event.sender?.id && event.message.mid);
   waitUntil(Promise.all(events.map(async (event) => {
     try {
       const message = event.message;
@@ -391,14 +425,20 @@ app.post('/webhook/instagram', (req, res) => {
         ? message.text.trim().slice(0, 4000)
         : `[${message.attachments?.[0]?.type || 'unsupported'}]`;
       const rowId = await addMsg(customerId, 'user', text, message.mid, timestamp);
-      if (!rowId) return; // Meta may retry webhook deliveries; message mid is unique.
+      if (!rowId) {
+        console.info('[ig-webhook] duplicate message ignored', requestId);
+        return;
+      }
       const convo = await getConvo(customerId);
       if (!convo?.username) await fetchName(customerId);
       const username = (await getConvo(customerId))?.username || null;
       await q('INSERT INTO customer_profiles(ig_id,username,created_at,updated_at) VALUES($1,$2,$3,$3) ON CONFLICT(ig_id) DO UPDATE SET username=COALESCE(EXCLUDED.username,customer_profiles.username),updated_at=EXCLUDED.updated_at', [customerId, username, timestamp]);
+      console.info('[ig-webhook] message stored; processing', JSON.stringify({ requestId, rowId, usernamePresent: Boolean(username) }));
       await handleIncoming(customerId, rowId);
-    } catch (error) { console.error('Instagram webhook event failed:', error.message); }
-  })));
+    } catch (error) {
+      console.error('[ig-webhook] event processing failed', JSON.stringify({ requestId, error: error.message }));
+    }
+  })).catch((error) => console.error('[ig-webhook] background processing failed', JSON.stringify({ requestId, error: error.message }))));
 });
 
 app.post('/webhook/razorpay', (req, res) => {
