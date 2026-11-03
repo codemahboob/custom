@@ -23,7 +23,7 @@ h1{font-size:clamp(34px,7vw,52px);line-height:.88;letter-spacing:-2.8px;font-wei
 .metric:last-child{margin-bottom:0}
 .metric-label{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:10px;line-height:1.2;font-weight:850;letter-spacing:.45px;color:var(--ink)}
 .metric-value{font-size:clamp(54px,12vw,78px);line-height:1.04;letter-spacing:-4.5px;font-weight:950;text-align:center;color:var(--blue);font-variant-numeric:tabular-nums;margin-top:4px}
-footer{border-top:1.5px solid var(--rule);margin-top:18px;padding-top:12px;display:flex;justify-content:space-between;font-size:9px;letter-spacing:1px;font-weight:800;color:var(--muted)}
+footer{border-top:1.5px solid var(--rule);margin-top:18px;padding-top:12px;display:flex;justify-content:space-between;font-size:9px;letter-spacing:1px;font-weight:800;color:var(--muted)}\n.connect{display:inline-block;margin-left:auto;margin-right:12px;padding:10px 11px;border:1.5px solid var(--blue);color:var(--blue);text-decoration:none;font:800 10px/1 Inter,ui-sans-serif,system-ui,sans-serif;letter-spacing:.35px}.connect:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
 .error{font-size:12px;color:#9b2929;margin-top:18px;min-height:18px}
 @media(max-width:480px){main{padding:24px 20px 34px}header{margin-bottom:30px}.intro{grid-template-columns:42px 1fr;gap:12px;margin-bottom:58px}.index{font-size:26px}h1{font-size:clamp(31px,9vw,42px);letter-spacing:-2px}.metric-value{font-size:clamp(52px,15vw,68px);letter-spacing:-3.5px}.metric{margin-bottom:11px;padding-bottom:9px}}
 </style>
@@ -31,7 +31,7 @@ footer{border-top:1.5px solid var(--rule);margin-top:18px;padding-top:12px;displ
 <body>
 <main>
 <header>
-  <div class="brand">CUSTOMPLATE®</div>
+  <div class="brand">CUSTOMPLATE®</div>\n  <a class="connect" href="/auth/instagram">CONNECT INSTAGRAM</a>
   <label class="date-control"><span class="sr-only">Date range</span><select id="date-range" aria-label="Select date range"><option value="today">Today</option><option value="week">This week</option><option value="month">This month</option><option value="lifetime" selected>Lifetime</option></select></label>
 </header>
 <section class="intro" aria-label="Dashboard heading">
