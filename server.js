@@ -68,8 +68,9 @@ const ig = async (body) => {
   const integration = await getInstagramIntegration(q);
   const token = integration?.access_token || E.IG_ACCESS_TOKEN;
   if (!token) throw new Error('Instagram is not connected. Open /auth/instagram to connect CustomPlate90.');
-  const endpoint = integration
-    ? `https://graph.facebook.com/${IG_API_VERSION}/${integration.ig_user_id}/messages`
+  const unifiedAccountId = integration?.ig_user_id || E.IG_USER_ID;
+  const endpoint = unifiedAccountId
+    ? `https://graph.facebook.com/${IG_API_VERSION}/${unifiedAccountId}/messages`
     : `https://graph.instagram.com/${IG_API_VERSION}/me/messages`;
   return fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) }).then(json);
 };
@@ -127,8 +128,9 @@ const fetchName = async (id) => {
     const integration = await getInstagramIntegration(q);
     const token = integration?.access_token || E.IG_ACCESS_TOKEN;
     if (!token) return;
-    const host = integration ? 'graph.facebook.com' : 'graph.instagram.com';
-    const version = integration ? IG_API_VERSION : (E.IG_API_VERSION || IG_API_VERSION);
+    const unifiedLogin = Boolean(integration || E.IG_USER_ID);
+    const host = unifiedLogin ? 'graph.facebook.com' : 'graph.instagram.com';
+    const version = unifiedLogin ? IG_API_VERSION : (E.IG_API_VERSION || IG_API_VERSION);
     const response = await fetch(`https://${host}/${version}/${id}?fields=username`, {
       headers: { Authorization: `Bearer ${token}` },
     }).then(json);
@@ -344,7 +346,7 @@ app.get('/health', async (_, res) => {
       instagram: Boolean(integration || (E.IG_API_VERSION && E.IG_ACCESS_TOKEN && E.IG_VERIFY_TOKEN)),
       instagramOAuth: Boolean(E.META_APP_ID && E.META_APP_SECRET && E.META_LOGIN_CONFIG_ID && E.META_TOKEN_ENCRYPTION_KEY),
       instagramWebhook: Boolean(E.IG_VERIFY_TOKEN && (E.META_APP_SECRET || E.IG_APP_SECRET)),
-      instagramInbox: Boolean(integration),
+      instagramInbox: Boolean(integration || (E.IG_USER_ID && E.IG_ACCESS_TOKEN)),
       gemini: Boolean(E.GEMINI_API_KEY),
       razorpay: Boolean(E.RAZORPAY_KEY_ID && E.RAZORPAY_KEY_SECRET && E.RAZORPAY_WEBHOOK_SECRET),
       resend: Boolean(E.RESEND_API_KEY && E.MAIL_FROM && E.OWNER_EMAIL),
