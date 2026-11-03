@@ -42,6 +42,9 @@ ALTER TABLE convos ADD COLUMN IF NOT EXISTS qr_id TEXT;
 ALTER TABLE convos ADD COLUMN IF NOT EXISTS amount INT;
 ALTER TABLE convos ADD COLUMN IF NOT EXISTS updated_at BIGINT;
 ALTER TABLE convos ADD COLUMN IF NOT EXISTS lock_until BIGINT NOT NULL DEFAULT 0;
+UPDATE convos SET lock_until=0 WHERE lock_until IS NULL;
+ALTER TABLE convos ALTER COLUMN lock_until SET DEFAULT 0;
+ALTER TABLE convos ALTER COLUMN lock_until SET NOT NULL;
 ALTER TABLE msgs ADD COLUMN IF NOT EXISTS mid TEXT;
 ALTER TABLE msgs ADD COLUMN IF NOT EXISTS ts BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS username TEXT;
@@ -302,7 +305,7 @@ async function runTool(id, u) {
   let o = JSON.parse(c.order_json);
   if (u.name === 'update_order') {
     if (c.status === 'awaiting_payment') return 'QR bheja ja chuka hai, order change nahi ho sakta. Change chahiye to call_owner karo.';
-    if (c.status === 'paid') { o = {}; await q("UPDATE convos SET status='chatting', qr_id=NULL WHERE ig_id=$1", [id]); } // new order
+    if (c.status === 'paid') { o = {}; await q("UPDATE convos SET status='chatting', qr_id=NULL, amount=NULL WHERE ig_id=$1", [id]); } // new order
     for (const k of NEED) if (u.input[k]) o[k] = String(u.input[k]).trim().slice(0, 500);
     if (o.phone && !validPhone(o.phone)) return 'Phone number valid nahi lag raha. 10 digit mobile number confirm karo.';
     if (o.address && !validAddress(o.address)) return 'Address me complete details aur 6 digit PIN code confirm karo.';
@@ -503,31 +506,53 @@ app.post('/webhook/instagram', (req, res) => {
     ignored: normalized.ignored,
   }));
 
-  res.sendStatus(200);
-  waitUntil(Promise.all(events.map(async (event) => {
-    try {
+  // Persist every accepted event before acknowledging Meta. If Postgres fails,
+  // return a retryable 5xx; unique message IDs make delivery retries idempotent.
+  const persisted = [];
+  try {
+    for (const event of events) {
       const message = event.message;
       const customerId = String(event.sender.id);
       const eventTime = Number(event.timestamp || Date.now());
       const timestamp = eventTime < 1e12 ? eventTime * 1000 : eventTime;
-      await q('INSERT INTO convos(ig_id,updated_at) VALUES($1,$2) ON CONFLICT(ig_id) DO UPDATE SET updated_at=GREATEST(COALESCE(convos.updated_at,0),EXCLUDED.updated_at)', [customerId, timestamp]);
-      const text = typeof message.text === 'string' && message.text.trim()
+      await q(
+        'INSERT INTO convos(ig_id,updated_at) VALUES($1,$2) ON CONFLICT(ig_id) DO UPDATE SET updated_at=GREATEST(COALESCE(convos.updated_at,0),EXCLUDED.updated_at)',
+        [customerId, timestamp]
+      );
+      const messageText = typeof message.text === 'string' && message.text.trim()
         ? message.text.trim().slice(0, 4000)
         : `[${message.attachments?.[0]?.type || 'unsupported'}]`;
       const messageId = message.mid || message.message_id;
-      const rowId = await addMsg(customerId, 'user', text, messageId, timestamp);
+      const rowId = await addMsg(customerId, 'user', messageText, messageId, timestamp);
       if (!rowId) {
         console.info('[ig-webhook] duplicate message ignored', requestId);
-        return;
+        continue;
       }
+      await q(
+        'INSERT INTO customer_profiles(ig_id,username,created_at,updated_at) VALUES($1,NULL,$2,$2) ON CONFLICT(ig_id) DO UPDATE SET updated_at=EXCLUDED.updated_at',
+        [customerId, timestamp]
+      );
+      persisted.push({ customerId, rowId });
+      console.info('[ig-webhook] message persisted', JSON.stringify({ requestId, rowId }));
+    }
+  } catch (error) {
+    console.error('[ig-webhook] durable persistence failed', JSON.stringify({ requestId, error: error.message }));
+    return res.sendStatus(503);
+  }
+
+  res.sendStatus(200);
+  waitUntil(Promise.all(persisted.map(async ({ customerId, rowId }) => {
+    try {
       const convo = await getConvo(customerId);
       if (!convo?.username) await fetchName(customerId);
       const username = (await getConvo(customerId))?.username || null;
-      await q('INSERT INTO customer_profiles(ig_id,username,created_at,updated_at) VALUES($1,$2,$3,$3) ON CONFLICT(ig_id) DO UPDATE SET username=COALESCE(EXCLUDED.username,customer_profiles.username),updated_at=EXCLUDED.updated_at', [customerId, username, timestamp]);
-      console.info('[ig-webhook] message stored; processing', JSON.stringify({ requestId, rowId, usernamePresent: Boolean(username) }));
+      await q(
+        'UPDATE customer_profiles SET username=COALESCE($1,username),updated_at=$2 WHERE ig_id=$3',
+        [username, Date.now(), customerId]
+      );
       await handleIncoming(customerId, rowId);
     } catch (error) {
-      console.error('[ig-webhook] event processing failed', JSON.stringify({ requestId, error: error.message }));
+      console.error('[ig-webhook] post-ack processing failed', JSON.stringify({ requestId, error: error.message }));
     }
   })).catch((error) => console.error('[ig-webhook] background processing failed', JSON.stringify({ requestId, error: error.message }))));
 });
@@ -555,6 +580,7 @@ app.post('/webhook/razorpay', (req, res) => {
 
 // dashboard data (the page itself is served at / above); the API needs the password
 app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store, max-age=0');
   const auth = req.get('authorization') || '';
   const token = auth.startsWith('Basic ') ? auth.slice(6) : '';
   let pass = ''; try { pass = Buffer.from(token, 'base64').toString('utf8').split(':').slice(1).join(':'); } catch {}
