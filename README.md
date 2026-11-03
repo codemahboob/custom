@@ -2,7 +2,7 @@
 
 Instagram DM sales assistant for custom number-plate orders. It uses Google Gemini for conversation, Razorpay UPI QR codes for payment, Neon/Postgres for durable conversations and customer memory, and Resend for owner notifications.
 
-## What changed in 1.1.0
+## What changed in 1.2.0
 
 - Payment confirmation now retrieves the payment directly from Razorpay and checks `captured`, INR currency, exact amount, and the QR code associated with the pending order.
 - The paid-order insert and conversation status update run in one Postgres transaction, with a unique payment ID to prevent duplicate orders from webhook retries/polling races.
@@ -10,7 +10,12 @@ Instagram DM sales assistant for custom number-plate orders. It uses Google Gemi
 - Added a password-protected Instagram inbox in the dashboard with conversation history, manual replies, pause/resume controls, webhook deduplication, Unified Login username lookup, and a server-side 24-hour messaging-window guard.
 - Added a dashboard customer panel showing saved facts, summary, and previous paid orders.
 - Added phone/PIN validation, timing-safe webhook signature checks, stronger dashboard password validation, a health/configuration endpoint, and Vercel configuration.
-- The agent now uses Google's Gemini API with configurable model selection.
+- The agent uses Google's Gemini API with configurable model selection.
+- Dashboard revenue, paid-order, conversation, and pending-payment totals are calculated with database aggregates, so lifetime figures are not capped by the inbox's 200-thread display limit.
+- The inbox returns only the fields it needs; full customer profile and paid-order details load only for the selected conversation.
+- The dashboard displays saved customer facts, summary, and recent paid-order history.
+- Database startup includes additive migrations for existing tables and a unique message-ID index.
+- Instagram webhook signature verification and payload normalization are isolated in tested utilities; generic subscription-test payloads are not mistaken for customer DMs.
 
 ## Requirements
 
@@ -50,7 +55,7 @@ For local testing, set `DELAY_SCALE=0`. Do not use test Razorpay keys for live c
 |---|---|
 | `DATABASE_URL` / `POSTGRES_URL` | Postgres connection |
 | `DASHBOARD_PASSWORD` | Dashboard password, minimum 16 chars; use 32+ random chars |
-| `GEMINI_API_KEY` | Google Gemini API key |
+| `SHOP_NAME` | Optional shop name used in the assistant's system prompt |\n| `GEMINI_API_KEY` | Google Gemini API key |
 | `GEMINI_MODEL` | Gemini model ID (default: `gemini-3.8-flash`) |
 | `META_APP_ID`, `META_APP_SECRET` | Meta app credentials for Unified Login and webhook signatures |
 | `META_LOGIN_CONFIG_ID` | Instagram Login Compatible Unified Login configuration ID |
@@ -59,7 +64,7 @@ For local testing, set `DELAY_SCALE=0`. Do not use test Razorpay keys for live c
 | `META_TOKEN_ENCRYPTION_KEY` | 32-byte hex/base64 key used to encrypt the connected token in Postgres |
 | `APP_URL` | Public app origin used to build the OAuth callback URL |
 | `IG_VERIFY_TOKEN` | Random webhook verification token |
-| `IG_USER_ID`, `IG_ACCESS_TOKEN` | Optional direct Unified Login System User Token fallback; set the Instagram professional account ID and a freshly rotated token |
+| `IG_USER_ID`, `IG_ACCESS_TOKEN` | Optional direct Unified Login System User Token fallback; set the Instagram professional account ID and a freshly rotated token |\n| `IG_API_VERSION` | Optional Graph API version for the direct-token fallback when `META_API_VERSION` is not set |\n| `IG_APP_SECRET` | Legacy alias for `META_APP_SECRET` used for Instagram webhook signature validation; both should be the same Meta app secret if both are set |
 | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Razorpay API credentials |
 | `RAZORPAY_WEBHOOK_SECRET` | Secret configured on the Razorpay webhook |
 | `RESEND_API_KEY`, `MAIL_FROM`, `OWNER_EMAIL` | Order and owner notification email |
@@ -112,4 +117,4 @@ A screenshot or a customer's claim is never proof of payment. The app checks the
 ## Commands
 
 - `npm start` — start the server
-- `npm test` — syntax checks for server and dashboard
+- `npm test` — JavaScript syntax checks, dashboard/privacy consistency checks, and webhook utility unit tests
