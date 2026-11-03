@@ -466,7 +466,7 @@ app.get('/webhook/instagram', (req, res) => {
 app.use((req, res, next) => ready.then(() => next(), next));
 const h = (fn) => (req, res, next) => fn(req, res).catch(next);
 
-app.post('/webhook/instagram', (req, res) => {
+app.post('/webhook/instagram', async (req, res) => {
   const requestId = req.get('x-vercel-id') || crypto.randomUUID();
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   const entries = Array.isArray(body.entry) ? body.entry : [];
