@@ -55,7 +55,8 @@ For local testing, set `DELAY_SCALE=0`. Do not use test Razorpay keys for live c
 |---|---|
 | `DATABASE_URL` / `POSTGRES_URL` | Postgres connection |
 | `DASHBOARD_PASSWORD` | Dashboard password, minimum 16 chars; use 32+ random chars |
-| `SHOP_NAME` | Optional shop name used in the assistant's system prompt |\n| `GEMINI_API_KEY` | Google Gemini API key |
+| `SHOP_NAME` | Optional shop name used in the assistant's system prompt |
+| `GEMINI_API_KEY` | Google Gemini API key |
 | `GEMINI_MODEL` | Gemini model ID (default: `gemini-3.8-flash`) |
 | `META_APP_ID`, `META_APP_SECRET` | Meta app credentials for Unified Login and webhook signatures |
 | `META_LOGIN_CONFIG_ID` | Instagram Login Compatible Unified Login configuration ID |
@@ -64,7 +65,9 @@ For local testing, set `DELAY_SCALE=0`. Do not use test Razorpay keys for live c
 | `META_TOKEN_ENCRYPTION_KEY` | 32-byte hex/base64 key used to encrypt the connected token in Postgres |
 | `APP_URL` | Public app origin used to build the OAuth callback URL |
 | `IG_VERIFY_TOKEN` | Random webhook verification token |
-| `IG_USER_ID`, `IG_ACCESS_TOKEN` | Optional direct Unified Login System User Token fallback; set the Instagram professional account ID and a freshly rotated token |\n| `IG_API_VERSION` | Optional Graph API version for the direct-token fallback when `META_API_VERSION` is not set |\n| `IG_APP_SECRET` | Legacy alias for `META_APP_SECRET` used for Instagram webhook signature validation; both should be the same Meta app secret if both are set |
+| `IG_USER_ID`, `IG_ACCESS_TOKEN` | Optional direct Unified Login System User Token fallback; set the Instagram professional account ID and a freshly rotated token |
+| `IG_API_VERSION` | Optional Graph API version for the direct-token fallback when `META_API_VERSION` is not set |
+| `IG_APP_SECRET` | Legacy alias for `META_APP_SECRET` used for Instagram webhook signature validation; both should be the same Meta app secret if both are set |
 | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Razorpay API credentials |
 | `RAZORPAY_WEBHOOK_SECRET` | Secret configured on the Razorpay webhook |
 | `RESEND_API_KEY`, `MAIL_FROM`, `OWNER_EMAIL` | Order and owner notification email |
