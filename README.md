@@ -59,7 +59,7 @@ For local testing, set `DELAY_SCALE=0`. Do not use test Razorpay keys for live c
 | `META_TOKEN_ENCRYPTION_KEY` | 32-byte hex/base64 key used to encrypt the connected token in Postgres |
 | `APP_URL` | Public app origin used to build the OAuth callback URL |
 | `IG_VERIFY_TOKEN` | Random webhook verification token |
-| `IG_ACCESS_TOKEN`, `IG_APP_SECRET` | Optional legacy Instagram Login fallback only |
+| `IG_USER_ID`, `IG_ACCESS_TOKEN` | Optional direct Unified Login System User Token fallback; set the Instagram professional account ID and a freshly rotated token |
 | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Razorpay API credentials |
 | `RAZORPAY_WEBHOOK_SECRET` | Secret configured on the Razorpay webhook |
 | `RESEND_API_KEY`, `MAIL_FROM`, `OWNER_EMAIL` | Order and owner notification email |
@@ -76,6 +76,8 @@ This repository uses Instagram API with Unified Login (Facebook Login for Busine
 - Webhook verify token: the exact value of `IG_VERIFY_TOKEN`.
 
 In Meta App Dashboard, select the Instagram API setup with Unified Login configuration labelled Instagram Login Compatible. Register the OAuth callback URL above as the redirect URI. Copy the Meta App ID, Meta App Secret and Configuration ID into Vercel. The configuration must include `instagram_basic` and `instagram_manage_messages`; permissions are selected in the Meta configuration, so the OAuth URL intentionally does not send a separate `scope` parameter.
+
+If you prefer a direct System User Token instead of OAuth, set `IG_USER_ID` to the Instagram professional account ID and `IG_ACCESS_TOKEN` to a freshly generated Unified Login System User Token in Vercel. The server then uses `graph.facebook.com` with that account ID. Never use a token copied from a screenshot or an exposed Graph API Explorer `paging.next` URL; revoke it and generate a new one first. Keep `META_APP_SECRET` set for webhook signature validation (or use `IG_APP_SECRET` for the same app secret).
 
 After deployment, open `/auth/instagram` and authorize the CustomPlate90 professional account. The callback exchanges the code, discovers the business portfolio and assigned Instagram account, subscribes it to the `messages` webhook field, and stores the token encrypted in Postgres. This implementation accepts exactly one assigned Instagram account to prevent connecting the wrong inbox. The account must be Business or Creator and shared from the selected business portfolio.
 
