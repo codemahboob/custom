@@ -108,15 +108,17 @@ export function createInstagramOAuthRouter({ q, ready }) {
 
       const profileUrl = new URL(graph('me'));
       profileUrl.searchParams.set('fields', 'client_business_id');
-      profileUrl.searchParams.set('access_token', token.access_token);
-      const profile = await readJson(await fetch(profileUrl));
+      const profile = await readJson(await fetch(profileUrl, {
+        headers: { Authorization: `Bearer ${token.access_token}` },
+      }));
       const businessId = profile.client_business_id;
       if (!businessId) throw new Error('No business portfolio was shared with this app. Retry login and select your business portfolio.');
 
       const accountsUrl = new URL(graph('me/assigned_instagram_accounts'));
       accountsUrl.searchParams.set('fields', 'id,username');
-      accountsUrl.searchParams.set('access_token', token.access_token);
-      const accounts = await readJson(await fetch(accountsUrl));
+      const accounts = await readJson(await fetch(accountsUrl, {
+        headers: { Authorization: `Bearer ${token.access_token}` },
+      }));
       const list = accounts.data || [];
       if (list.length !== 1) {
         if (!list.length) throw new Error('No Instagram professional account was shared. Check that CustomPlate90 is a Business or Creator account in the selected business portfolio, then reconnect.');
