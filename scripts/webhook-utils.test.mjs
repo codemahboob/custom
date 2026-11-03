@@ -5,6 +5,7 @@ import {
   safeEqual,
   verifyMetaWebhookSignature,
   normalizeInstagramMessageEvents,
+  isCapturedInrPayment,
 } from '../webhook-utils.js';
 
 test('safeEqual compares non-empty UTF-8 strings without coercion bugs', () => {
@@ -77,4 +78,18 @@ test('ignores generic webhook subscription test notifications', () => {
   });
   assert.equal(result.changeEvents.length, 0);
   assert.equal(result.events.length, 0);
+});
+
+test('accepts Razorpay QR-scoped payment data without undocumented qr_code_id', () => {
+  const payment = {
+    id: 'pay_test123',
+    status: 'captured',
+    currency: 'INR',
+    amount: 120000,
+  };
+  assert.equal(isCapturedInrPayment(payment, 'pay_test123', 120000), true);
+  assert.equal(isCapturedInrPayment({ ...payment, amount: 70000 }, 'pay_test123', 120000), false);
+  assert.equal(isCapturedInrPayment({ ...payment, status: 'authorized' }, 'pay_test123', 120000), false);
+  assert.equal(isCapturedInrPayment({ ...payment, currency: 'USD' }, 'pay_test123', 120000), false);
+  assert.equal(isCapturedInrPayment(payment, 'pay_different', 120000), false);
 });
