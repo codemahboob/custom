@@ -540,8 +540,7 @@ app.post('/webhook/instagram', (req, res) => {
     return res.sendStatus(503);
   }
 
-  res.sendStatus(200);
-  waitUntil(Promise.all(persisted.map(async ({ customerId, rowId }) => {
+  const backgroundWork = Promise.all(persisted.map(async ({ customerId, rowId }) => {
     try {
       const convo = await getConvo(customerId);
       if (!convo?.username) await fetchName(customerId);
@@ -554,7 +553,9 @@ app.post('/webhook/instagram', (req, res) => {
     } catch (error) {
       console.error('[ig-webhook] post-ack processing failed', JSON.stringify({ requestId, error: error.message }));
     }
-  })).catch((error) => console.error('[ig-webhook] background processing failed', JSON.stringify({ requestId, error: error.message }))));
+  })).catch((error) => console.error('[ig-webhook] background processing failed', JSON.stringify({ requestId, error: error.message })));
+  waitUntil(backgroundWork);
+  return res.sendStatus(200);
 });
 
 app.post('/webhook/razorpay', (req, res) => {
