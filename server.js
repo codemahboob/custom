@@ -205,21 +205,39 @@ const findPayment = async (c) => {
 };
 
 async function confirmPaid(id, paymentId) {
+  // Verify payment with Razorpay before opening a database transaction so a slow
+  // third-party API call does not hold a row lock.
+  const payment = await rzp(`/payments/${encodeURIComponent(paymentId)}`);
+  if (String(payment.id || '') !== String(paymentId) ||
+      payment.status !== 'captured' || payment.currency !== 'INR') return false;
+
   const client = await pool.connect();
   let c;
   try {
     await client.query('BEGIN');
     c = (await client.query('SELECT * FROM convos WHERE ig_id=$1 FOR UPDATE', [id])).rows[0];
-    if (!c || c.status !== 'awaiting_payment' || !c.qr_id || !c.amount) { await client.query('ROLLBACK'); return false; }
-    const payment = await rzp(`/payments/${encodeURIComponent(paymentId)}`);
-    if (payment.status !== 'captured' || payment.currency !== 'INR' || payment.amount !== c.amount * 100 || payment.qr_code_id !== c.qr_id) { await client.query('ROLLBACK'); return false; }
+    if (!c || c.status !== 'awaiting_payment' || !c.qr_id || !c.amount ||
+        payment.amount !== c.amount * 100 || payment.qr_code_id !== c.qr_id) {
+      await client.query('ROLLBACK');
+      return false;
+    }
     const now = Date.now();
-    const inserted = await client.query('INSERT INTO orders(ig_id,username,order_json,amount,payment_id,paid_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(payment_id) DO NOTHING RETURNING id', [id, c.username, c.order_json, c.amount, paymentId, now]);
-    if (!inserted.rowCount) { await client.query('ROLLBACK'); return false; }
+    const inserted = await client.query(
+      'INSERT INTO orders(ig_id,username,order_json,amount,payment_id,paid_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(payment_id) DO NOTHING RETURNING id',
+      [id, c.username, c.order_json, c.amount, paymentId, now]
+    );
+    if (!inserted.rowCount) {
+      await client.query('ROLLBACK');
+      return false;
+    }
     await client.query("UPDATE convos SET status='paid', updated_at=$1 WHERE ig_id=$2", [now, id]);
     await client.query('COMMIT');
-  } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; }
-  finally { client.release(); }
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
   const o = JSON.parse(c.order_json);
   const row = (k, v) => `<tr><td style="padding:6px 14px;color:#666">${esc(k)}</td><td style="padding:6px 14px"><b>${esc(v)}</b></td></tr>`;
   await mail(`Paid ₹${c.amount} - ${o.plate_text} (${o.name})`, `<table>${row('Instagram', '@' + c.username)}${row('Vehicle', o.vehicle)}${row('Plate text', o.plate_text)}${row('Name', o.name)}${row('Phone', o.phone)}${row('Address', o.address)}${row('Amount', '₹' + c.amount)}${row('Razorpay payment', paymentId)}</table>`);
