@@ -7,6 +7,7 @@ import DASHBOARD from './dashboard-html.js';
 import PRIVACY_POLICY from './privacy-policy.js';
 import { createInstagramOAuthRouter, getInstagramIntegration } from './instagram-oauth.js';
 import { safeEqual, verifyMetaWebhookSignature, normalizeInstagramMessageEvents, isCapturedInrPayment } from './webhook-utils.js';
+import { toGeminiContents, fromGeminiParts } from './gemini-utils.js';
 
 const E = process.env;
 const PRICE = { car: Number(E.PRICE_CAR || 1200), bike: Number(E.PRICE_BIKE || 700) };
@@ -137,41 +138,25 @@ const mail = (subject, html) => fetch('https://api.resend.com/emails', {
 const gemini = async (system, messages) => {
   if (!E.GEMINI_API_KEY) throw new Error('Set GEMINI_API_KEY in Vercel environment variables.');
   const model = E.GEMINI_MODEL || 'gemini-3.8-flash';
-  const namesById = new Map();
-  const contents = messages.map((message) => {
-    const role = message.role === 'assistant' ? 'model' : 'user';
-    const blocks = Array.isArray(message.content) ? message.content : [{ type: 'text', text: String(message.content ?? '') }];
-    const parts = blocks.flatMap((block) => {
-      if (block.type === 'text') return block.text ? [{ text: block.text }] : [];
-      if (block.type === 'tool_use') {
-        namesById.set(block.id, block.name);
-        return [{ functionCall: { name: block.name, args: block.input || {}, ...(block.id ? { id: block.id } : {}) } }];
-      }
-      if (block.type === 'tool_result') {
-        const name = namesById.get(block.tool_use_id);
-        return name ? [{ functionResponse: { name, response: { output: String(block.content ?? '') }, ...(block.tool_use_id ? { id: block.tool_use_id } : {}) } }] : [];
-      }
-      return [];
-    });
-    return parts.length ? { role, parts } : null;
-  }).filter(Boolean);
+  const contents = toGeminiContents(messages);
   const body = {
     systemInstruction: { parts: [{ text: system }] },
     contents,
     tools: [{ functionDeclarations: TOOLS.map(({ name, description, input_schema }) => ({ name, description, parameters: input_schema })) }],
-    generationConfig: { maxOutputTokens: 700 },
+    generationConfig: { maxOutputTokens: 1200 },
   };
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: 'POST',
     headers: { 'x-goog-api-key': E.GEMINI_API_KEY, 'content-type': 'application/json' },
     body: JSON.stringify(body),
   }).then(json);
-  const parts = response.candidates?.[0]?.content?.parts || [];
-  return { content: parts.flatMap((part) => {
-    if (part.text) return [{ type: 'text', text: part.text }];
-    if (part.functionCall) return [{ type: 'tool_use', id: part.functionCall.id || crypto.randomUUID(), name: part.functionCall.name, input: part.functionCall.args || {} }];
-    return [];
-  }) };
+  const candidate = response.candidates?.[0];
+  const parts = candidate?.content?.parts || [];
+  if (!parts.length) {
+    const reason = candidate?.finishReason || response.promptFeedback?.blockReason || 'no response parts';
+    throw new Error(`Gemini returned no usable response: ${reason}`);
+  }
+  return { content: fromGeminiParts(parts) };
 };
 const fetchName = async (id) => {
   try {
@@ -394,7 +379,7 @@ async function respond(id) {
       return;
     }
     const results = [];
-    for (const u of uses) results.push({ type: 'tool_result', tool_use_id: u.id, content: await runTool(id, u).catch((e) => 'error: ' + e.message) });
+    for (const u of uses) results.push({ type: 'tool_result', tool_use_id: u.id, name: u.name, content: await runTool(id, u).catch((e) => 'error: ' + e.message) });
     msgs.push({ role: 'user', content: results });
   }
 }
