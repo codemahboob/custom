@@ -8,6 +8,7 @@ import PRIVACY_POLICY from './privacy-policy.js';
 import { createInstagramOAuthRouter, getInstagramIntegration } from './instagram-oauth.js';
 import { safeEqual, verifyMetaWebhookSignature, normalizeInstagramMessageEvents, isCapturedInrPayment } from './webhook-utils.js';
 import { toGeminiContents, fromGeminiParts } from './gemini-utils.js';
+import { sanitizeCustomerMemory } from './customer-memory-utils.js';
 
 const E = process.env;
 const PRICE = { car: Number(E.PRICE_CAR || 1200), bike: Number(E.PRICE_BIKE || 700) };
@@ -327,11 +328,8 @@ async function runTool(id, u) {
     return `QR (₹${amount}) bhej diya. Ab chhota message likho: pay karke screenshot bhej do.`;
   }
   if (u.name === 'remember_customer') {
-    const facts = u.input.facts && typeof u.input.facts === 'object' && !Array.isArray(u.input.facts) ? u.input.facts : {};
-    const safe = Object.fromEntries(Object.entries(facts).filter(([k,v]) => /^[a-z0-9_]{2,40}$/i.test(k) && !/(phone|mobile|address|email|name|password|payment|card|upi|dob|birth|religion|health)/i.test(k) && typeof v === 'string' && v.length <= 240).slice(0, 20));
-    const rawSummary = typeof u.input.summary === 'string' ? u.input.summary.trim().slice(0, 1000) : '';
-    const summary = /(?:\b\d{10,}\b|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|\b(?:password|upi|card number|phone number|address)\b)/i.test(rawSummary) ? '' : rawSummary;
-    await saveProfile(id, c.username, safe, summary);
+    const safe = sanitizeCustomerMemory(u.input?.facts, u.input?.summary);
+    await saveProfile(id, c.username, safe.facts, safe.summary);
     return 'Customer memory saved.';
   }
   if (u.name === 'call_owner') {
