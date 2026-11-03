@@ -6,7 +6,7 @@ import { waitUntil } from '@vercel/functions';
 import DASHBOARD from './dashboard-html.js';
 import PRIVACY_POLICY from './privacy-policy.js';
 import { createInstagramOAuthRouter, getInstagramIntegration } from './instagram-oauth.js';
-import { safeEqual, verifyMetaWebhookSignature, normalizeInstagramMessageEvents } from './webhook-utils.js';
+import { safeEqual, verifyMetaWebhookSignature, normalizeInstagramMessageEvents, isCapturedInrPayment } from './webhook-utils.js';
 
 const E = process.env;
 const PRICE = { car: Number(E.PRICE_CAR || 1200), bike: Number(E.PRICE_BIKE || 700) };
@@ -200,24 +200,43 @@ async function sendQR(id, url, amount) {
 
 // ---------- payments ----------
 const findPayment = async (c) => {
-  const r = await rzp(`/payments/qr_codes/${c.qr_id}/payments`);
-  return (r.items || []).find((p) => p.status === 'captured' && p.currency === 'INR' && p.amount === c.amount * 100 && p.qr_code_id === c.qr_id);
+  if (!c?.qr_id || !Number.isSafeInteger(Number(c.amount)) || Number(c.amount) < 1) return null;
+  const r = await rzp(`/payments/qr_codes/${encodeURIComponent(c.qr_id)}/payments`);
+  return (r.items || []).find((payment) =>
+    payment.status === 'captured' &&
+    payment.currency === 'INR' &&
+    payment.amount === Number(c.amount) * 100
+  ) || null;
 };
 
 async function confirmPaid(id, paymentId) {
-  // Verify payment with Razorpay before opening a database transaction so a slow
-  // third-party API call does not hold a row lock.
-  const payment = await rzp(`/payments/${encodeURIComponent(paymentId)}`);
-  if (String(payment.id || '') !== String(paymentId) ||
-      payment.status !== 'captured' || payment.currency !== 'INR') return false;
+  // First read the pending QR, then verify the payment both by ID and through
+  // Razorpay's QR-scoped payment list. Payment entities do not expose qr_code_id.
+  const pending = await getConvo(id);
+  if (!pending || pending.status !== 'awaiting_payment' || !pending.qr_id ||
+      !Number.isSafeInteger(Number(pending.amount)) || Number(pending.amount) < 1) return false;
+
+  const [payment, qrPayments] = await Promise.all([
+    rzp(`/payments/${encodeURIComponent(paymentId)}`),
+    rzp(`/payments/qr_codes/${encodeURIComponent(pending.qr_id)}/payments`),
+  ]);
+  const belongsToQr = (qrPayments.items || []).some((item) =>
+    String(item.id || '') === String(paymentId) &&
+    item.status === 'captured' &&
+    item.currency === 'INR' &&
+    item.amount === Number(pending.amount) * 100
+  );
+  if (!belongsToQr || !isCapturedInrPayment(payment, paymentId, Number(pending.amount) * 100)) return false;
 
   const client = await pool.connect();
   let c;
   try {
     await client.query('BEGIN');
     c = (await client.query('SELECT * FROM convos WHERE ig_id=$1 FOR UPDATE', [id])).rows[0];
-    if (!c || c.status !== 'awaiting_payment' || !c.qr_id || !c.amount ||
-        payment.amount !== c.amount * 100 || payment.qr_code_id !== c.qr_id) {
+    // Re-check order state after the external API calls to prevent a stale QR
+    // verification from paying a newer order in this conversation.
+    if (!c || c.status !== 'awaiting_payment' ||
+        c.qr_id !== pending.qr_id || Number(c.amount) !== Number(pending.amount)) {
       await client.query('ROLLBACK');
       return false;
     }
