@@ -24,7 +24,10 @@ const rand = (a, b) => a + Math.random() * (b - a);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const NEED = ['vehicle', 'plate_text', 'name', 'phone', 'address'];
 const missing = (o) => NEED.filter((k) => !o[k]);
-const validPhone = (v) => /^[+0-9()\s-]{8,20}$/.test(String(v || '')) && String(v).replace(/\D/g, '').length >= 10;
+const validPhone = (v) => /^[+0-9()\s-]{8,20}$/.test(String(v || '')) && (() => {
+  const digits = String(v).replace(/\D/g, '');
+  return digits.length >= 10 && digits.length <= 15;
+})();
 const validAddress = (v) => String(v || '').trim().length >= 12 && /\b\d{6}\b/.test(String(v || ''));
 
 // ---------- database (Postgres, e.g. Neon from the Vercel Marketplace) ----------
@@ -133,11 +136,23 @@ const rzp = (path, body) => fetch('https://api.razorpay.com/v1' + path, {
   headers: { 'Content-Type': 'application/json', Authorization: 'Basic ' + Buffer.from(`${E.RAZORPAY_KEY_ID}:${E.RAZORPAY_KEY_SECRET}`).toString('base64') },
   body: body && JSON.stringify(body),
 }).then(json);
-const mail = (subject, html) => fetch('https://api.resend.com/emails', {
-  method: 'POST',
-  headers: { Authorization: `Bearer ${E.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-  body: JSON.stringify({ from: E.MAIL_FROM, to: [E.OWNER_EMAIL], subject, html }),
-}).then(json).catch((e) => console.error('mail failed:', e.message));
+const mail = async (subject, html) => {
+  if (!E.RESEND_API_KEY || !E.MAIL_FROM || !E.OWNER_EMAIL) {
+    console.error('mail unavailable: Resend environment is incomplete');
+    return false;
+  }
+  try {
+    const result = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${E.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: E.MAIL_FROM, to: [E.OWNER_EMAIL], subject, html }),
+    }).then(json);
+    return Boolean(result?.id);
+  } catch (error) {
+    console.error('mail failed:', error.message);
+    return false;
+  }
+};
 const gemini = async (system, messages) => {
   if (!E.GEMINI_API_KEY) throw new Error('Set GEMINI_API_KEY in Vercel environment variables.');
   const model = E.GEMINI_MODEL || 'gemini-3.8-flash';
@@ -346,8 +361,10 @@ async function runTool(id, u) {
   }
   if (u.name === 'call_owner') {
     await q('UPDATE convos SET paused=1 WHERE ig_id=$1', [id]);
-    await mail(`Customer needs you: @${c.username || id}`, `<p>${esc(u.input.reason)}</p><p>Bot is paused for this chat. Reply on Instagram, or resume from the dashboard.</p>`);
-    return 'Owner ko bata diya. Customer ko bolo ki owner jaldi reply karenge.';
+    const notified = await mail(`Customer needs you: @${c.username || id}`, `<p>${esc(u.input.reason)}</p><p>Bot is paused for this chat. Reply on Instagram, or resume from the dashboard.</p>`);
+    return notified
+      ? 'Owner ko bata diya. Customer ko bolo ki owner jaldi reply karenge.'
+      : 'Chat ko human follow-up ke liye pause kar diya hai, lekin owner ko email alert nahi ja saka. Dashboard me owner ko manually inform karo.';
   }
   return 'unknown tool';
 }
@@ -378,8 +395,18 @@ async function respond(id) {
   for (let i = 0; i < 5; i++) {
     const cur = await getConvo(id);
     const o = JSON.parse(cur.order_json);
-    const pastOrders = (await q('SELECT order_json,amount,paid_at FROM orders WHERE ig_id=$1 ORDER BY paid_at DESC LIMIT 5', [id])).rows;
-    const system = `${PROMPT}\n\nPERSISTENT CUSTOMER MEMORY: ${JSON.stringify(profile?.profile_json || {})}\nCUSTOMER SUMMARY: ${profile?.memory_summary || 'No saved summary yet.'}\nPAST PAID ORDERS: ${JSON.stringify(pastOrders)}\nSTATUS: ${cur.status}\nORDER ABHI: ${JSON.stringify(o)}\nMISSING: ${missing(o).join(', ') || 'kuch nahi'}`;
+    const pastOrderRows = (await q('SELECT order_json,amount,paid_at FROM orders WHERE ig_id=$1 ORDER BY paid_at DESC LIMIT 5', [id])).rows;
+    const pastOrders = pastOrderRows.map((item) => {
+      let previous = {};
+      try { previous = typeof item.order_json === 'string' ? JSON.parse(item.order_json) : (item.order_json || {}); } catch {}
+      return {
+        vehicle: previous.vehicle || null,
+        plate_text: previous.plate_text || null,
+        amount: Number(item.amount || 0),
+        paid_at: Number(item.paid_at || 0),
+      };
+    });
+    const system = `${PROMPT}\n\nPERSISTENT CUSTOMER MEMORY: ${JSON.stringify(profile?.profile_json || {})}\nCUSTOMER SUMMARY: ${profile?.memory_summary || 'No saved summary yet.'}\nPAST PAID ORDERS (personal contact/delivery fields omitted): ${JSON.stringify(pastOrders)}\nSTATUS: ${cur.status}\nORDER ABHI: ${JSON.stringify(o)}\nMISSING: ${missing(o).join(', ') || 'kuch nahi'}`;
     const r = await gemini(system, msgs);
     msgs.push({ role: 'assistant', content: r.content });
     const uses = r.content.filter((b) => b.type === 'tool_use');
