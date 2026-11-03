@@ -305,11 +305,21 @@ async function runTool(id, u) {
   let o = JSON.parse(c.order_json);
   if (u.name === 'update_order') {
     if (c.status === 'awaiting_payment') return 'QR bheja ja chuka hai, order change nahi ho sakta. Change chahiye to call_owner karo.';
-    if (c.status === 'paid') { o = {}; await q("UPDATE convos SET status='chatting', qr_id=NULL, amount=NULL WHERE ig_id=$1", [id]); } // new order
-    for (const k of NEED) if (u.input[k]) o[k] = String(u.input[k]).trim().slice(0, 500);
+    const startingNewOrder = c.status === 'paid';
+    if (startingNewOrder) o = {};
+    const input = u.input && typeof u.input === 'object' && !Array.isArray(u.input) ? u.input : {};
+    for (const k of NEED) {
+      if (typeof input[k] === 'string' && input[k].trim()) o[k] = input[k].trim().slice(0, 500);
+    }
+    if (o.vehicle && !Object.hasOwn(PRICE, o.vehicle)) return 'Vehicle type car ya bike confirm karo.';
     if (o.phone && !validPhone(o.phone)) return 'Phone number valid nahi lag raha. 10 digit mobile number confirm karo.';
     if (o.address && !validAddress(o.address)) return 'Address me complete details aur 6 digit PIN code confirm karo.';
-    await setOrder(id, o);
+    if (startingNewOrder) {
+      await q("UPDATE convos SET status='chatting', qr_id=NULL, amount=NULL, order_json=$2, updated_at=$3 WHERE ig_id=$1",
+        [id, JSON.stringify(o), Date.now()]);
+    } else {
+      await setOrder(id, o);
+    }
     return JSON.stringify({ order: o, missing: missing(o), price: PRICE[o.vehicle] ?? null });
   }
   if (u.name === 'send_payment_qr') {
