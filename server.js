@@ -44,8 +44,8 @@ const getConvo = async (id) => (await q('SELECT * FROM convos WHERE ig_id=$1', [
 const setOrder = (id, o) => q('UPDATE convos SET order_json=$1, updated_at=$2 WHERE ig_id=$3', [JSON.stringify(o), Date.now(), id]);
 const getProfile = async (id) => (await q('SELECT * FROM customer_profiles WHERE ig_id=$1', [id])).rows[0] || null;
 const saveProfile = async (id, username, profile, summary) => q(`INSERT INTO customer_profiles(ig_id,username,profile_json,memory_summary,created_at,updated_at) VALUES($1,$2,$3::jsonb,$4,$5,$5) ON CONFLICT(ig_id) DO UPDATE SET username=COALESCE(EXCLUDED.username,customer_profiles.username), profile_json=customer_profiles.profile_json || EXCLUDED.profile_json, memory_summary=CASE WHEN EXCLUDED.memory_summary='' THEN customer_profiles.memory_summary ELSE EXCLUDED.memory_summary END, updated_at=EXCLUDED.updated_at`, [id, username, JSON.stringify(profile), summary || '', Date.now()]);
-const addMsg = async (id, role, text, mid = null) =>
-  (await q('INSERT INTO msgs(ig_id,role,text,mid,ts) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING id', [id, role, text, mid, Date.now()])).rows[0]?.id;
+const addMsg = async (id, role, text, mid = null, ts = Date.now()) =>
+  (await q('INSERT INTO msgs(ig_id,role,text,mid,ts) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING id', [id, role, text, mid, ts])).rows[0]?.id;
 
 // ---------- external APIs ----------
 const json = async (r) => {
@@ -54,7 +54,17 @@ const json = async (r) => {
   return j;
 };
 const IG_API_VERSION = E.META_API_VERSION || E.IG_API_VERSION || 'v26.0';
+const assertMessagingWindow = async (recipientId) => {
+  const lastInbound = (await q("SELECT ts FROM msgs WHERE ig_id=$1 AND role='user' ORDER BY id DESC LIMIT 1", [recipientId])).rows[0];
+  if (!lastInbound) throw new Error('Cannot message this Instagram user before they message your account.');
+  const age = Date.now() - Number(lastInbound.ts);
+  if (age < -5 * 60 * 1000 || age > 24 * 60 * 60 * 1000) {
+    throw new Error('Instagram standard 24-hour messaging window has expired. Ask the customer to message your account again before replying.');
+  }
+};
 const ig = async (body) => {
+  const recipientId = body?.recipient?.id;
+  if (recipientId && (body.message || body.sender_action)) await assertMessagingWindow(String(recipientId));
   const integration = await getInstagramIntegration(q);
   const token = integration?.access_token || E.IG_ACCESS_TOKEN;
   if (!token) throw new Error('Instagram is not connected. Open /auth/instagram to connect CustomPlate90.');
@@ -112,7 +122,19 @@ const gemini = async (system, messages) => {
     return [];
   }) };
 };
-const fetchName = (id) => E.IG_ACCESS_TOKEN ? fetch(`https://graph.instagram.com/${IG_API_VERSION}/${id}?fields=username`, { headers: { Authorization: `Bearer ${E.IG_ACCESS_TOKEN}` } }).then(json).then((u) => q('UPDATE convos SET username=$1 WHERE ig_id=$2', [u.username, id])).catch(() => {}) : Promise.resolve();
+const fetchName = async (id) => {
+  try {
+    const integration = await getInstagramIntegration(q);
+    const token = integration?.access_token || E.IG_ACCESS_TOKEN;
+    if (!token) return;
+    const host = integration ? 'graph.facebook.com' : 'graph.instagram.com';
+    const version = integration ? IG_API_VERSION : (E.IG_API_VERSION || IG_API_VERSION);
+    const response = await fetch(`https://${host}/${version}/${id}?fields=username`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(json);
+    if (response.username) await q('UPDATE convos SET username=$1 WHERE ig_id=$2', [response.username, id]);
+  } catch (error) { console.warn('Instagram username lookup failed:', error.message); }
+};
 
 // ---------- human-like sending ----------
 async function say(id, text) {
@@ -315,8 +337,20 @@ app.get('/', (_, res) => res.type('html').send(DASHBOARD)); // the page holds no
 app.get(['/privacy-policy', '/privacy-policy.html'], (_, res) => res.type('html').send(PRIVACY_POLICY));
 app.get('/dashboard', (_, res) => res.redirect('/'));
 app.get('/health', async (_, res) => {
-  try { await ready; await q('SELECT 1'); res.json({ ok: true, database: 'connected', configured: { instagram: Boolean((await getInstagramIntegration(q)) || (E.IG_API_VERSION && E.IG_ACCESS_TOKEN && E.IG_VERIFY_TOKEN)), instagramOAuth: Boolean(E.META_APP_ID && E.META_APP_SECRET && E.META_LOGIN_CONFIG_ID && E.META_TOKEN_ENCRYPTION_KEY), gemini: Boolean(E.GEMINI_API_KEY), razorpay: Boolean(E.RAZORPAY_KEY_ID && E.RAZORPAY_KEY_SECRET && E.RAZORPAY_WEBHOOK_SECRET), resend: Boolean(E.RESEND_API_KEY && E.MAIL_FROM && E.OWNER_EMAIL), dashboard: Boolean(E.DASHBOARD_PASSWORD && E.DASHBOARD_PASSWORD.length >= 16) } }); }
-  catch (e) { res.status(500).json({ ok: false, error: String(e.message).slice(0, 150) }); }
+  try {
+    await ready; await q('SELECT 1');
+    const integration = await getInstagramIntegration(q);
+    res.json({ ok: true, database: 'connected', configured: {
+      instagram: Boolean(integration || (E.IG_API_VERSION && E.IG_ACCESS_TOKEN && E.IG_VERIFY_TOKEN)),
+      instagramOAuth: Boolean(E.META_APP_ID && E.META_APP_SECRET && E.META_LOGIN_CONFIG_ID && E.META_TOKEN_ENCRYPTION_KEY),
+      instagramWebhook: Boolean(E.IG_VERIFY_TOKEN && (E.META_APP_SECRET || E.IG_APP_SECRET)),
+      instagramInbox: Boolean(integration),
+      gemini: Boolean(E.GEMINI_API_KEY),
+      razorpay: Boolean(E.RAZORPAY_KEY_ID && E.RAZORPAY_KEY_SECRET && E.RAZORPAY_WEBHOOK_SECRET),
+      resend: Boolean(E.RESEND_API_KEY && E.MAIL_FROM && E.OWNER_EMAIL),
+      dashboard: Boolean(E.DASHBOARD_PASSWORD && E.DASHBOARD_PASSWORD.length >= 16)
+    } });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e.message).slice(0, 150) }); }
 });
 app.use((req, res, next) => ready.then(() => next(), next));
 const h = (fn) => (req, res, next) => fn(req, res).catch(next);
@@ -327,21 +361,32 @@ app.get('/webhook/instagram', (req, res) =>
 app.post('/webhook/instagram', (req, res) => {
   const appSecret = E.META_APP_SECRET || E.IG_APP_SECRET;
   if (!appSecret || !req.raw) return res.sendStatus(503);
-  const good = 'sha256=' + crypto.createHmac('sha256', appSecret).update(req.raw).digest('hex');
-  const sig = req.get('x-hub-signature-256') || '';
-  if (sig.length !== good.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(good))) return res.sendStatus(401);
+  const expected = 'sha256=' + crypto.createHmac('sha256', appSecret).update(req.raw).digest('hex');
+  const supplied = req.get('x-hub-signature-256') || '';
+  if (supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) return res.sendStatus(401);
+  if (!['instagram', 'page'].includes(String(req.body?.object || 'instagram'))) return res.sendStatus(200);
   res.sendStatus(200);
-  const events = (req.body.entry || []).flatMap((e) => e.messaging || []).filter((ev) => ev.message && !ev.message.is_echo && ev.sender?.id && ev.message.mid);
-  waitUntil(Promise.all(events.map(async (ev) => {
+  const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
+  const events = entries.flatMap((entry) => Array.isArray(entry.messaging) ? entry.messaging : [])
+    .filter((event) => event.message && !event.message.is_echo && event.sender?.id && event.message.mid);
+  waitUntil(Promise.all(events.map(async (event) => {
     try {
-      const m = ev.message, id = ev.sender.id;
-      await q('INSERT INTO convos(ig_id,updated_at) VALUES($1,$2) ON CONFLICT DO NOTHING', [id, Date.now()]);
-      const text = m.text || `[${m.attachments?.[0]?.type || 'unsupported'}]`;
-      const rowId = await addMsg(id, 'user', text, m.mid);
-      if (!rowId) return; // duplicate delivery
-      if (!(await getConvo(id)).username) { await fetchName(id); const username = (await getConvo(id))?.username || null; await q('INSERT INTO customer_profiles(ig_id,username,created_at,updated_at) VALUES($1,$2,$3,$3) ON CONFLICT(ig_id) DO UPDATE SET username=COALESCE(EXCLUDED.username,customer_profiles.username),updated_at=EXCLUDED.updated_at', [id, username, Date.now()]); }
-      await handleIncoming(id, rowId);
-    } catch (e) { console.error('incoming failed', e.message); }
+      const message = event.message;
+      const customerId = String(event.sender.id);
+      const eventTime = Number(event.timestamp || Date.now());
+      const timestamp = eventTime < 1e12 ? eventTime * 1000 : eventTime;
+      await q('INSERT INTO convos(ig_id,updated_at) VALUES($1,$2) ON CONFLICT(ig_id) DO UPDATE SET updated_at=GREATEST(COALESCE(convos.updated_at,0),EXCLUDED.updated_at)', [customerId, timestamp]);
+      const text = typeof message.text === 'string' && message.text.trim()
+        ? message.text.trim().slice(0, 4000)
+        : `[${message.attachments?.[0]?.type || 'unsupported'}]`;
+      const rowId = await addMsg(customerId, 'user', text, message.mid, timestamp);
+      if (!rowId) return; // Meta may retry webhook deliveries; message mid is unique.
+      const convo = await getConvo(customerId);
+      if (!convo?.username) await fetchName(customerId);
+      const username = (await getConvo(customerId))?.username || null;
+      await q('INSERT INTO customer_profiles(ig_id,username,created_at,updated_at) VALUES($1,$2,$3,$3) ON CONFLICT(ig_id) DO UPDATE SET username=COALESCE(EXCLUDED.username,customer_profiles.username),updated_at=EXCLUDED.updated_at', [customerId, username, timestamp]);
+      await handleIncoming(customerId, rowId);
+    } catch (error) { console.error('Instagram webhook event failed:', error.message); }
   })));
 });
 
@@ -374,8 +419,20 @@ app.get('/api/data', h(async (_, res) => res.json({
   orders: (await q('SELECT * FROM orders ORDER BY id DESC LIMIT 200')).rows,
   convos: (await q('SELECT c.ig_id,c.username,c.paused,c.status,c.amount,c.order_json,c.updated_at,p.profile_json,p.memory_summary FROM convos c LEFT JOIN customer_profiles p USING(ig_id) ORDER BY c.updated_at DESC LIMIT 200')).rows,
 })));
-app.get('/api/msgs/:id', h(async (req, res) => res.json((await q('SELECT role,text,ts FROM msgs WHERE ig_id=$1 ORDER BY id DESC LIMIT 500', [req.params.id])).rows.reverse())));
+app.get('/api/msgs/:id', h(async (req, res) => res.json((await q('SELECT role,text,ts,mid FROM msgs WHERE ig_id=$1 ORDER BY id DESC LIMIT 500', [req.params.id])).rows.reverse())));
 app.get('/api/customer/:id', h(async (req, res) => { const id = req.params.id; const [profile, orders] = await Promise.all([getProfile(id), q('SELECT order_json,amount,payment_id,paid_at FROM orders WHERE ig_id=$1 ORDER BY paid_at DESC LIMIT 50', [id])]); res.json({ profile: profile?.profile_json || {}, summary: profile?.memory_summary || '', orders: orders.rows }); }));
+app.post('/api/reply/:id', h(async (req, res) => {
+  const id = String(req.params.id || '').trim();
+  const text = String(req.body?.text || '').trim();
+  if (!id || !text) return res.status(400).json({ error: 'Customer and message text are required.' });
+  if (Buffer.byteLength(text, 'utf8') > 1000) return res.status(400).json({ error: 'Instagram message text must be 1,000 bytes or fewer.' });
+  const latest = (await q("SELECT ts FROM msgs WHERE ig_id=$1 AND role='user' ORDER BY id DESC LIMIT 1", [id])).rows[0];
+  if (!latest || Date.now() - Number(latest.ts) > 24 * 60 * 60 * 1000) return res.status(409).json({ error: 'The Instagram 24-hour reply window is closed. Ask the customer to message your account again.' });
+  const sent = await ig({ recipient: { id }, message: { text } });
+  await addMsg(id, 'assistant', text, sent.message_id || null);
+  await q('UPDATE convos SET updated_at=$1 WHERE ig_id=$2', [Date.now(), id]);
+  res.json({ ok: true, message_id: sent.message_id || null });
+}));
 app.post('/api/pause/:id', h(async (req, res) => { await q('UPDATE convos SET paused=1-paused WHERE ig_id=$1', [req.params.id]); res.sendStatus(204); }));
 
 app.use((err, _req, res, _next) => { console.error(err.message); res.status(500).send('server error'); });
