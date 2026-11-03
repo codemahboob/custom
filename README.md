@@ -7,6 +7,7 @@ Instagram DM sales assistant for custom number-plate orders. It uses Google Gemi
 - Payment confirmation now retrieves the payment directly from Razorpay and checks `captured`, INR currency, exact amount, and the QR code associated with the pending order.
 - The paid-order insert and conversation status update run in one Postgres transaction, with a unique payment ID to prevent duplicate orders from webhook retries/polling races.
 - Added persistent `customer_profiles` memory keyed by Instagram sender ID. The agent can save useful non-sensitive facts and a short summary, and receives that memory plus up to five previous paid orders in later conversations.
+- Added a password-protected Instagram inbox in the dashboard with conversation history, manual replies, pause/resume controls, webhook deduplication, Unified Login username lookup, and a server-side 24-hour messaging-window guard.
 - Added a dashboard customer panel showing saved facts, summary, and previous paid orders.
 - Added phone/PIN validation, timing-safe webhook signature checks, stronger dashboard password validation, a health/configuration endpoint, and Vercel configuration.
 - The agent now uses Google's Gemini API with configurable model selection.
@@ -80,7 +81,7 @@ After deployment, open `/auth/instagram` and authorize the CustomPlate90 profess
 
 Generate `META_TOKEN_ENCRYPTION_KEY` with `openssl rand -hex 32`. Keep it in Vercel Environment Variables only; never commit it. If you rotate this key, reconnect Instagram after migrating the stored token.
 
-The Meta webhook callback remains separate: set it to `https://YOUR_DOMAIN/webhook/instagram`, verify with `IG_VERIFY_TOKEN`, and subscribe to `messages`. Meta App Review / Advanced Access may be required for people outside app roles. Instagram's messaging window and policy restrictions still apply.
+The Meta webhook callback remains separate: set it to `https://YOUR_DOMAIN/webhook/instagram`, verify with `IG_VERIFY_TOKEN`, and subscribe to `messages`. Incoming webhook requests are verified with `META_APP_SECRET` (or the legacy `IG_APP_SECRET`) using `X-Hub-Signature-256`; message IDs are deduplicated before processing. The dashboard inbox is available on `/` after login. Manual replies use the connected Unified Login token and are blocked after the standard 24-hour customer messaging window expires. Meta App Review / Advanced Access may be required for people outside app roles. Instagram's messaging window and policy restrictions still apply.
 
 ## Razorpay webhook
 
