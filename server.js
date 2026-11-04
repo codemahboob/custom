@@ -5,7 +5,7 @@ import pg from 'pg';
 import { waitUntil } from '@vercel/functions';
 import DASHBOARD from './dashboard-html.js';
 import PRIVACY_POLICY from './privacy-policy.js';
-import { createInstagramOAuthRouter, getInstagramIntegration } from './instagram-oauth.js';
+import { createInstagramOAuthRouter, getInstagramIntegration, storeInstagramIntegration } from './instagram-oauth.js';
 import { safeEqual, verifyMetaWebhookSignature, normalizeInstagramMessageEvents, isCapturedInrPayment } from './webhook-utils.js';
 import { toGeminiContents, fromGeminiParts } from './gemini-utils.js';
 import { sanitizeCustomerMemory } from './customer-memory-utils.js';
@@ -176,19 +176,10 @@ const gemini = async (system, messages) => {
   }
   return { content: fromGeminiParts(parts) };
 };
-const fetchName = async (id) => {
-  try {
-    const integration = await getInstagramIntegration(q);
-    const token = integration?.access_token || E.IG_ACCESS_TOKEN;
-    if (!token) return;
-    const unifiedLogin = Boolean(integration || E.IG_USER_ID);
-    const host = unifiedLogin ? 'graph.facebook.com' : 'graph.instagram.com';
-    const version = unifiedLogin ? IG_API_VERSION : (E.IG_API_VERSION || IG_API_VERSION);
-    const response = await fetch(`https://${host}/${version}/${id}?fields=username`, {
-      headers: { Authorization: `Bearer ${token}` },
-    }).then(json);
-    if (response.username) await q('UPDATE convos SET username=$1 WHERE ig_id=$2', [response.username, id]);
-  } catch (error) { console.warn('Instagram username lookup failed:', error.message); }
+const fetchName = async (_id) => {
+  // Meta deprecated the username field for this Graph API version.
+  // Keep the customer ID as the stable inbox identity; do not make a failing
+  // profile lookup block message processing.
 };
 
 // ---------- human-like sending ----------
@@ -645,6 +636,26 @@ app.get('/api/instagram/status', h(async (_, res) => {
     webhook_signature_ready: Boolean(String(E.META_APP_SECRET || E.IG_APP_SECRET || '').trim()),
     verify_token_ready: Boolean(String(E.IG_VERIFY_TOKEN || '').trim()),
   });
+}));
+app.post('/api/instagram/token', h(async (req, res) => {
+  const accessToken = String(req.body?.access_token || '').trim();
+  const igUserId = String(req.body?.ig_user_id || E.IG_USER_ID || '').trim();
+  if (!accessToken || accessToken.length > 10000 || !/^\d{5,32}$/.test(igUserId)) {
+    return res.status(400).json({ error: 'A valid access token and Instagram account ID are required.' });
+  }
+  // Verify this token can access the exact Instagram professional account before storing it.
+  const verifyUrl = new URL(`https://graph.facebook.com/${IG_API_VERSION}/${encodeURIComponent(igUserId)}`);
+  verifyUrl.searchParams.set('fields', 'id');
+  const verified = await fetch(verifyUrl, { headers: { Authorization: `Bearer ${accessToken}` } }).then(json);
+  if (String(verified.id) !== igUserId) return res.status(403).json({ error: 'The token does not have access to the configured Instagram account.' });
+  const subscribeUrl = new URL(`https://graph.facebook.com/${IG_API_VERSION}/${encodeURIComponent(igUserId)}/subscribed_apps`);
+  subscribeUrl.searchParams.set('subscribed_fields', 'messages');
+  const subscription = await fetch(subscribeUrl, {
+    method: 'POST', headers: { Authorization: `Bearer ${accessToken}` },
+  }).then(json);
+  if (!subscription.success) return res.status(502).json({ error: 'Meta did not confirm the messages webhook subscription.' });
+  await storeInstagramIntegration(q, { accessToken, igUserId });
+  res.json({ ok: true, account_id: igUserId, webhook_subscribed: true, token_expires_at: null });
 }));
 app.post('/api/instagram/subscribe', h(async (_, res) => {
   const result = await subscribeInstagramWebhook();
