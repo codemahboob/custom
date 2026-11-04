@@ -35,6 +35,18 @@ const required = (...names) => {
   if (missing.length) throw new Error(`Missing environment variables: ${missing.join(', ')}`);
 };
 
+export async function storeInstagramIntegration(q, { accessToken, igUserId }) {
+  required('META_TOKEN_ENCRYPTION_KEY');
+  key();
+  const existing = await q("SELECT business_id FROM meta_integrations WHERE provider='instagram' LIMIT 1");
+  await q(`INSERT INTO meta_integrations(provider,token_ciphertext,ig_user_id,username,business_id,token_expires_at,connected_at)
+    VALUES('instagram',$1,$2,NULL,$3,NULL,$4)
+    ON CONFLICT(provider) DO UPDATE SET token_ciphertext=EXCLUDED.token_ciphertext,
+    ig_user_id=EXCLUDED.ig_user_id,username=NULL,business_id=COALESCE(meta_integrations.business_id,EXCLUDED.business_id),
+    token_expires_at=NULL,connected_at=EXCLUDED.connected_at`,
+  [encrypt(accessToken), String(igUserId), existing.rows[0]?.business_id || null, Date.now()]);
+}
+
 export async function getInstagramIntegration(q) {
   const result = await q("SELECT * FROM meta_integrations WHERE provider='instagram' LIMIT 1");
   const row = result.rows[0];
