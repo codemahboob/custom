@@ -163,11 +163,23 @@ const gemini = async (system, messages) => {
     tools: [{ functionDeclarations: TOOLS.map(({ name, description, input_schema }) => ({ name, description, parameters: input_schema })) }],
     generationConfig: { maxOutputTokens: 1200 },
   };
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-    method: 'POST',
-    headers: { 'x-goog-api-key': E.GEMINI_API_KEY, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  }).then(json);
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  let response;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const result = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'x-goog-api-key': E.GEMINI_API_KEY, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (result.ok) {
+      response = await result.json();
+      break;
+    }
+    const detail = await result.text().catch(() => '');
+    const transient = result.status === 429 || result.status === 503 || /UNAVAILABLE|high demand|overloaded/i.test(detail);
+    if (!transient || attempt === 2) throw new Error(`Gemini API ${result.status}: ${detail.slice(0, 800)}`);
+    await wait(1000 * (2 ** attempt));
+  }
   const candidate = response.candidates?.[0];
   const parts = candidate?.content?.parts || [];
   if (!parts.length) {
