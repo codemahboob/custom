@@ -64,6 +64,10 @@ footer{border-top:1.5px solid var(--rule);margin-top:18px;padding-top:12px;displ
   <div class="inbox-top">
     <div><div class="inbox-kicker">05 — CUSTOMER MESSAGES</div><h2>INSTAGRAM INBOX</h2></div>
     <div style="display:flex;gap:7px"><button id="subscribe-inbox" type="button">ENABLE WEBHOOKS</button><button id="refresh-inbox" type="button">REFRESH</button></div>
+    <form id="token-refresh-form" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;width:100%">
+      <input id="instagram-token" type="password" autocomplete="off" placeholder="Paste new Meta Instagram access token" aria-label="New Instagram access token" required style="flex:1;min-width:220px;padding:10px;border:1px solid var(--rule);font:12px Inter,system-ui">
+      <button id="save-instagram-token" type="submit">UPDATE TOKEN</button>
+    </form>
   </div>
   <div class="inbox-grid">
     <aside class="thread-list" id="thread-list" aria-label="Conversations"><div class="inbox-note">Loading conversations…</div></aside>
@@ -201,6 +205,22 @@ async function refreshInbox(){
   }catch(error){inboxError.textContent=error.message;}
 }
 document.getElementById('refresh-inbox').addEventListener('click',refreshInbox);
+document.getElementById('token-refresh-form').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const input=document.getElementById('instagram-token');
+  const button=document.getElementById('save-instagram-token');
+  const token=input.value.trim();
+  if(!token)return;
+  button.disabled=true;inboxError.textContent='Verifying token and updating encrypted connection…';
+  try{
+    const response=await api('/api/instagram/token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({access_token:token,ig_user_id:'17841451027537139'})});
+    const result=await response.json();
+    if(!response.ok)throw new Error(result.error||'Token update failed.');
+    input.value='';
+    inboxError.textContent='Instagram token updated securely. Messages webhook subscription confirmed.';
+  }catch(error){inboxError.textContent=error.message;}
+  finally{button.disabled=false;}
+});
 document.getElementById('subscribe-inbox').addEventListener('click',async()=>{
   const button=document.getElementById('subscribe-inbox');button.disabled=true;inboxError.textContent='Subscribing this Instagram account to message webhooks…';
   try{const response=await api('/api/instagram/subscribe',{method:'POST'});const result=await response.json();inboxError.textContent=result.ok?'Instagram message webhook subscription enabled.':'Meta did not confirm the subscription; check the app webhook settings.';}
