@@ -9,6 +9,7 @@ import { createInstagramOAuthRouter, getInstagramIntegration, storeInstagramInte
 import { safeEqual, verifyMetaWebhookSignature, normalizeInstagramMessageEvents, isCapturedInrPayment } from './webhook-utils.js';
 import { toGeminiContents, fromGeminiParts } from './gemini-utils.js';
 import { sanitizeCustomerMemory } from './customer-memory-utils.js';
+import { retryDelayMs, isTerminalAttempt } from './message-queue-utils.js';
 
 const E = process.env;
 const PRICE = { car: Number(E.PRICE_CAR || 1200), bike: Number(E.PRICE_BIKE || 700) };
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS convos(ig_id TEXT PRIMARY KEY, username TEXT, paused 
 CREATE TABLE IF NOT EXISTS msgs(id BIGSERIAL PRIMARY KEY, ig_id TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL, mid TEXT UNIQUE, ts BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS orders(id BIGSERIAL PRIMARY KEY, ig_id TEXT NOT NULL, username TEXT, order_json TEXT NOT NULL, amount INT NOT NULL, payment_id TEXT UNIQUE NOT NULL, paid_at BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS customer_profiles(ig_id TEXT PRIMARY KEY, username TEXT, profile_json JSONB NOT NULL DEFAULT '{}'::jsonb, memory_summary TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS message_jobs(id BIGSERIAL PRIMARY KEY, ig_id TEXT NOT NULL, message_row_id BIGINT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending', attempts INT NOT NULL DEFAULT 0, available_at BIGINT NOT NULL, locked_until BIGINT NOT NULL DEFAULT 0, last_error TEXT, created_at BIGINT NOT NULL);
 ALTER TABLE convos ADD COLUMN IF NOT EXISTS memory_summary TEXT NOT NULL DEFAULT '';
 ALTER TABLE convos ADD COLUMN IF NOT EXISTS username TEXT;
 ALTER TABLE convos ADD COLUMN IF NOT EXISTS paused INT NOT NULL DEFAULT 0;
@@ -79,6 +81,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS msgs_mid_unique ON msgs(mid) WHERE mid IS NOT 
 CREATE INDEX IF NOT EXISTS orders_ig ON orders(ig_id, paid_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS orders_payment_id_unique ON orders(payment_id) WHERE payment_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS convos_updated ON convos(updated_at DESC);
+CREATE INDEX IF NOT EXISTS message_jobs_ready ON message_jobs(status, available_at, locked_until, id);
 CREATE TABLE IF NOT EXISTS meta_oauth_states(state_hash TEXT PRIMARY KEY, expires_at BIGINT NOT NULL);
 CREATE TABLE IF NOT EXISTS meta_integrations(provider TEXT PRIMARY KEY, token_ciphertext TEXT NOT NULL, ig_user_id TEXT NOT NULL, username TEXT, business_id TEXT, token_expires_at BIGINT, connected_at BIGINT NOT NULL);`;
 const ready = (E.DATABASE_URL || E.POSTGRES_URL)
@@ -208,14 +211,17 @@ async function say(id, text) {
   }
 }
 
-async function sendQR(id, url, amount) {
+async function sendQR(id, imageUrl, amount, fallbackUrl) {
   await sleep(rand(1500, 3000));
   try {
-    await ig({ recipient: { id }, message: { attachment: { type: 'image', payload: { url } } } });
+    if (!imageUrl) throw new Error('Razorpay did not return a QR image URL.');
+    await ig({ recipient: { id }, message: { attachment: { type: 'image', payload: { url: imageUrl } } } });
     await addMsg(id, 'assistant', `[QR code bheja, ₹${amount}]`);
   } catch (e) {
-    console.error('QR image failed, sending link:', e.message);
-    await say(id, `QR link: ${url}`);
+    console.error('QR image failed, sending payment link:', e.message);
+    const link = fallbackUrl || imageUrl;
+    if (!link) throw new Error('Razorpay returned neither a QR image nor a payment link.');
+    await say(id, `Payment link: ${link}`);
   }
 }
 
@@ -285,17 +291,6 @@ async function confirmPaid(id, paymentId) {
   return true;
 }
 
-// re-check Razorpay for ~3.5 min after a screenshot (the Razorpay webhook is the main path)
-async function watch(id) {
-  for (let i = 0; i < 7; i++) {
-    await wait(30000);
-    const c = await getConvo(id);
-    if (c.status !== 'awaiting_payment') return;
-    const p = await findPayment(c).catch(() => null);
-    if (p) return confirmPaid(id, p.id);
-  }
-}
-
 // ---------- agent ----------
 const PROMPT = `Tum ${E.SHOP_NAME || 'hamari shop'} ke Instagram DM pe number plate orders handle karte ho. Baat aise karo jaise ek friendly dukaan wala banda: chhote casual Hinglish messages, "bhai", kam emoji, ek baar me ek hi sawal. Lamba paragraph kabhi nahi. Do alag messages bhejne ho to beech me blank line chhodo (max 3). Customer jis language me likhe usi me jawab do.
 
@@ -354,7 +349,7 @@ async function runTool(id, u) {
       close_by: Math.floor(Date.now() / 1000) + 86400, notes: { ig_id: id },
     });
     await q("UPDATE convos SET status='awaiting_payment', qr_id=$1, amount=$2, updated_at=$3 WHERE ig_id=$4", [qr.id, amount, Date.now(), id]);
-    await sendQR(id, qr.image_url, amount);
+    await sendQR(id, qr.image_url, amount, qr.short_url);
     return `QR (₹${amount}) bhej diya. Ab chhota message likho: pay karke screenshot bhej do.`;
   }
   if (u.name === 'remember_customer') {
@@ -372,7 +367,7 @@ async function runTool(id, u) {
   return 'unknown tool';
 }
 
-async function respond(id) {
+async function respond(id, { quietPaymentPending = false } = {}) {
   const c = await getConvo(id);
   if (c.paused) return;
   const [history, profile] = await Promise.all([q('SELECT role,text FROM msgs WHERE ig_id=$1 ORDER BY id DESC LIMIT 30', [id]), getProfile(id)]);
@@ -386,7 +381,7 @@ async function respond(id) {
   if (c.status === 'awaiting_payment' && fresh.includes('[image]')) {
     const p = await findPayment(c).catch(() => null);
     if (p) { await confirmPaid(id, p.id); return; }
-    await say(id, 'screenshot mil gaya bhai, payment check kar raha hu\n\n1-2 min me confirm karta hu');
+    if (!quietPaymentPending) await say(id, 'screenshot mil gaya bhai, payment check kar raha hu\n\n1-2 min me confirm karta hu');
     return 'watch';
   }
 
@@ -426,21 +421,77 @@ async function respond(id) {
 
 // Stateless debounce + per-chat lock (serverless functions share no memory):
 // every incoming message waits a few seconds; only the invocation of the LATEST message replies.
-async function handleIncoming(id, rowId) {
+async function handleIncoming(id, rowId, options = {}) {
   await sleep(rand(2500, 5000));
   const newer = await q("SELECT 1 FROM msgs WHERE ig_id=$1 AND role='user' AND id>$2 LIMIT 1", [id, rowId]);
   if (newer.rowCount) return; // a later message will answer for both
   let locked = false;
-  for (let i = 0; i < 40 && !locked; i++) {
-    const got = await q('UPDATE convos SET lock_until=$1 WHERE ig_id=$2 AND lock_until<$3', [Date.now() + 120000, id, Date.now()]);
-    if (got.rowCount) locked = true; else await wait(3000);
+  for (let i = 0; i < 15 && !locked; i++) {
+    const now = Date.now();
+    const got = await q('UPDATE convos SET lock_until=$1 WHERE ig_id=$2 AND lock_until<$3', [now + 60000, id, now]);
+    if (got.rowCount) locked = true; else await wait(1000);
   }
-  if (!locked) return;
-  let result;
-  try { result = await respond(id); }
-  catch (e) { console.error('respond failed', id, e.message); }
-  finally { await q('UPDATE convos SET lock_until=0 WHERE ig_id=$1', [id]); }
-  if (result === 'watch') await watch(id).catch((e) => console.error('watch failed', e.message));
+  if (!locked) throw new Error('Conversation is busy; retry this queued message.');
+  try { return await respond(id, options); }
+  catch (e) {
+    console.error('respond failed', id, e.message);
+    throw e;
+  } finally { await q('UPDATE convos SET lock_until=0 WHERE ig_id=$1', [id]); }
+}
+
+// Durable queue: messages are committed before Meta receives its webhook acknowledgement.
+// The immediate worker reduces latency; the authenticated scheduled worker recovers interrupted tasks.
+async function claimMessageJob() {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const now = Date.now();
+    const selected = (await client.query(
+      `SELECT id,ig_id,message_row_id,attempts FROM message_jobs
+       WHERE (status='pending' AND available_at <= $1)
+          OR (status='processing' AND locked_until < $1)
+       ORDER BY id ASC LIMIT 1 FOR UPDATE SKIP LOCKED`, [now]
+    )).rows[0];
+    if (!selected) { await client.query('COMMIT'); return null; }
+    const updated = (await client.query(
+      `UPDATE message_jobs SET status='processing',attempts=attempts+1,locked_until=$2
+       WHERE id=$1 RETURNING attempts`, [selected.id, now + 90000]
+    )).rows[0];
+    await client.query('COMMIT');
+    return { ...selected, attempts: Number(updated.attempts) };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally { client.release(); }
+}
+
+async function processQueuedMessages({ maxJobs = 4, budgetMs = 45000 } = {}) {
+  const started = Date.now();
+  let processed = 0;
+  while (processed < maxJobs && Date.now() - started < budgetMs) {
+    const job = await claimMessageJob();
+    if (!job) break;
+    try {
+      const result = await handleIncoming(job.ig_id, Number(job.message_row_id), { quietPaymentPending: job.attempts > 1 });
+      if (result === 'watch' && job.attempts < 8) {
+        await q(`UPDATE message_jobs SET status='pending',available_at=$2,locked_until=0,last_error=NULL WHERE id=$1`, [job.id, Date.now() + 30000]);
+      } else if (result === 'watch') {
+        await q(`UPDATE message_jobs SET status='failed',locked_until=0,last_error='Payment was not found after eight checks; verify manually.' WHERE id=$1`, [job.id]);
+      } else {
+        await q(`UPDATE message_jobs SET status='completed',locked_until=0,last_error=NULL WHERE id=$1`, [job.id]);
+      }
+    } catch (error) {
+      const terminal = isTerminalAttempt(job.attempts);
+      const delay = retryDelayMs(job.attempts);
+      await q(
+        `UPDATE message_jobs SET status=$2,available_at=$3,locked_until=0,last_error=$4 WHERE id=$1`,
+        [job.id, terminal ? 'failed' : 'pending', Date.now() + delay, String(error?.message || error).slice(0, 1000)]
+      );
+      console.error('[message-queue] job failed', JSON.stringify({ jobId: job.id, attempts: job.attempts, terminal, error: String(error?.message || error).slice(0, 300) }));
+    }
+    processed++;
+  }
+  return processed;
 }
 
 // ---------- http ----------
@@ -472,8 +523,10 @@ app.get('/health', async (_, res) => {
       gemini: Boolean(E.GEMINI_API_KEY),
       razorpay: Boolean(E.RAZORPAY_KEY_ID && E.RAZORPAY_KEY_SECRET && E.RAZORPAY_WEBHOOK_SECRET),
       resend: Boolean(E.RESEND_API_KEY && E.MAIL_FROM && E.OWNER_EMAIL),
-      dashboard: Boolean(E.DASHBOARD_PASSWORD && E.DASHBOARD_PASSWORD.length >= 16)
-    } });
+      dashboard: Boolean(E.DASHBOARD_PASSWORD && E.DASHBOARD_PASSWORD.length >= 16),
+      messageQueue: true,
+      queueCron: Boolean(E.CRON_SECRET)
+    }, queue: Object.fromEntries((await q('SELECT status,COUNT(*)::int AS count FROM message_jobs GROUP BY status')).rows.map((row) => [row.status, row.count])) });
   } catch (e) { res.status(500).json({ ok: false, error: String(e.message).slice(0, 150) }); }
 });
 // Meta's verification handshake is intentionally independent of database health.
@@ -570,7 +623,9 @@ app.post('/webhook/instagram', async (req, res) => {
           [customerId, messageId]
         )).rows[0];
         if (existing?.id) {
-          persisted.push({ customerId, rowId: Number(existing.id) });
+          const existingRowId = Number(existing.id);
+          await q('INSERT INTO message_jobs(ig_id,message_row_id,available_at,created_at) VALUES($1,$2,$3,$3) ON CONFLICT(message_row_id) DO NOTHING', [customerId, existingRowId, Date.now()]);
+          persisted.push({ customerId, rowId: existingRowId });
           console.info('[ig-webhook] duplicate message queued for safe retry', requestId);
         } else {
           console.info('[ig-webhook] duplicate message ignored', requestId);
@@ -581,6 +636,7 @@ app.post('/webhook/instagram', async (req, res) => {
         'INSERT INTO customer_profiles(ig_id,username,created_at,updated_at) VALUES($1,NULL,$2,$2) ON CONFLICT(ig_id) DO UPDATE SET updated_at=EXCLUDED.updated_at',
         [customerId, timestamp]
       );
+      await q('INSERT INTO message_jobs(ig_id,message_row_id,available_at,created_at) VALUES($1,$2,$3,$3) ON CONFLICT(message_row_id) DO NOTHING', [customerId, rowId, Date.now()]);
       persisted.push({ customerId, rowId });
       console.info('[ig-webhook] message persisted', JSON.stringify({ requestId, rowId }));
     }
@@ -589,22 +645,29 @@ app.post('/webhook/instagram', async (req, res) => {
     return res.sendStatus(503);
   }
 
-  const backgroundWork = Promise.all(persisted.map(async ({ customerId, rowId }) => {
-    try {
-      const convo = await getConvo(customerId);
-      if (!convo?.username) await fetchName(customerId);
-      const username = (await getConvo(customerId))?.username || null;
-      await q(
-        'UPDATE customer_profiles SET username=COALESCE($1,username),updated_at=$2 WHERE ig_id=$3',
-        [username, Date.now(), customerId]
-      );
-      await handleIncoming(customerId, rowId);
-    } catch (error) {
-      console.error('[ig-webhook] post-ack processing failed', JSON.stringify({ requestId, error: error.message }));
+  const backgroundWork = (async () => {
+    for (const { customerId } of persisted) {
+      try {
+        const convo = await getConvo(customerId);
+        if (!convo?.username) await fetchName(customerId);
+        const username = (await getConvo(customerId))?.username || null;
+        await q('UPDATE customer_profiles SET username=COALESCE($1,username),updated_at=$2 WHERE ig_id=$3', [username, Date.now(), customerId]);
+      } catch (error) {
+        console.error('[ig-webhook] profile enrichment failed', JSON.stringify({ requestId, error: error.message }));
+      }
     }
-  })).catch((error) => console.error('[ig-webhook] background processing failed', JSON.stringify({ requestId, error: error.message })));
+    await processQueuedMessages();
+  })().catch((error) => console.error('[ig-webhook] queue worker failed', JSON.stringify({ requestId, error: error.message })));
   waitUntil(backgroundWork);
   return res.sendStatus(200);
+});
+
+app.get('/internal/process-queue', (req, res) => {
+  const secret = String(E.CRON_SECRET || '').trim();
+  const supplied = req.get('authorization') || '';
+  if (!secret || !safeEqual(supplied, `Bearer ${secret}`)) return res.sendStatus(401);
+  waitUntil(processQueuedMessages().catch((error) => console.error('[message-queue] scheduled worker failed', error.message)));
+  return res.status(202).json({ ok: true, queued: true });
 });
 
 app.post('/webhook/razorpay', (req, res) => {
