@@ -6,6 +6,7 @@ Instagram DM sales assistant for custom number-plate orders. It uses Google Gemi
 
 - Payment confirmation now retrieves the payment directly from Razorpay and checks `captured`, INR currency, exact amount, and the QR code associated with the pending order.
 - The paid-order insert and conversation status update run in one Postgres transaction, with a unique payment ID to prevent duplicate orders from webhook retries/polling races.
+- Added a durable Postgres-backed message queue with retry/backoff so webhook messages can be recovered if a serverless background invocation is interrupted. `/health` now reports queue job counts.
 - Added persistent `customer_profiles` memory keyed by Instagram sender ID. The agent can save useful non-sensitive facts and a short summary, and receives that memory plus up to five previous paid orders in later conversations.
 - Added a password-protected Instagram inbox in the dashboard with conversation history, manual replies, pause/resume controls, webhook deduplication, Unified Login username lookup, and a server-side 24-hour messaging-window guard.
 - Added a dashboard customer panel showing saved facts, summary, and previous paid orders.
@@ -45,9 +46,10 @@ For local testing, set `DELAY_SCALE=0`. Do not use test Razorpay keys for live c
 1. Import this repository into Vercel.
 2. Add all required variables from `.env.example` in Project Settings → Environment Variables. Do not commit `.env`. Set `META_APP_ID`, `META_APP_SECRET`, `META_LOGIN_CONFIG_ID`, `META_REDIRECT_URI`, and a 32-byte `META_TOKEN_ENCRYPTION_KEY`.
 3. Add/connect Neon Postgres and set `DATABASE_URL` (or `POSTGRES_URL`).
-4. Deploy. The app creates/updates its tables and indexes automatically on first startup.
-5. Check `/health` and verify all expected integrations show `true`.
-6. Configure the webhook URLs below, then test with a Meta app-role account and Razorpay test mode before enabling real sales.
+4. Set `CRON_SECRET` to a long random value in Vercel. Add GitHub repository Actions secrets `APP_URL` (your deployed origin, e.g. `https://your-project.vercel.app`) and `CRON_SECRET` (the same value). The included GitHub Actions workflow drains/retries pending messages every five minutes; it can also be run manually.
+5. Deploy. The app creates/updates its tables and indexes automatically on first startup.
+6. Check `/health`, verify all expected integrations show `true`, and confirm the queue section is present.
+7. Configure the webhook URLs below, then test with a Meta app-role account and Razorpay test mode before enabling real sales.
 
 ## Environment variables
 
@@ -73,6 +75,7 @@ For local testing, set `DELAY_SCALE=0`. Do not use test Razorpay keys for live c
 | `RESEND_API_KEY`, `MAIL_FROM`, `OWNER_EMAIL` | Order and owner notification email |
 | `PRICE_CAR`, `PRICE_BIKE` | Whole-rupee prices (defaults ₹1,200 and ₹700) |
 | `DELAY_SCALE` | Human-like delays; set `0` for testing |
+| `CRON_SECRET` | Bearer token required by the scheduled durable-queue recovery endpoint |
 
 ## Instagram Unified Login OAuth
 
@@ -92,6 +95,10 @@ After deployment, open `/auth/instagram` and authorize the CustomPlate90 profess
 Generate `META_TOKEN_ENCRYPTION_KEY` with `openssl rand -hex 32`. Keep it in Vercel Environment Variables only; never commit it. If you rotate this key, reconnect Instagram after migrating the stored token.
 
 The Meta webhook callback remains separate: set it to `https://YOUR_DOMAIN/webhook/instagram`, verify with `IG_VERIFY_TOKEN`, and subscribe to `messages`. Incoming webhook requests are verified with `META_APP_SECRET` (or the legacy `IG_APP_SECRET`) using `X-Hub-Signature-256`; message IDs are deduplicated before processing. The dashboard inbox is available on `/` after login. Manual replies use the connected Unified Login token and are blocked after the standard 24-hour customer messaging window expires. Meta App Review / Advanced Access may be required for people outside app roles. Instagram's messaging window and policy restrictions still apply.
+
+## Durable message processing
+
+Incoming Instagram messages are saved to `msgs` and enqueued in `message_jobs` before the webhook returns success. A best-effort `waitUntil` worker handles them immediately. If that serverless task is interrupted, the GitHub Actions workflow calls `/internal/process-queue` every five minutes to retry pending or expired-lease jobs with exponential backoff. Add the `APP_URL` and `CRON_SECRET` repository Actions secrets and set the same `CRON_SECRET` in Vercel. Jobs that fail eight times are marked `failed` for manual investigation; they are not silently discarded.
 
 ## Razorpay webhook
 
